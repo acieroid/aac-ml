@@ -17,6 +17,7 @@ and exp =
   | App of exp * exp list
   | Abs of lam
   | Letrec of var * exp * exp
+  | If of exp * exp * exp
 
 let rec string_of_exp = function
   | Var x -> x
@@ -31,6 +32,9 @@ let rec string_of_exp = function
   | Letrec (x, e, body) ->
     Printf.sprintf "(letrec ((%s %s)) %s)" x (string_of_exp e)
       (string_of_exp body)
+  | If (cond, cons, alt) ->
+    Printf.sprintf "(if %s %s %s)"
+      (string_of_exp cond) (string_of_exp cons) (string_of_exp alt)
 
 (** Addresses *)
 module type AddressSignature = sig
@@ -158,6 +162,7 @@ module Frame = struct
     | AppL of exp list * Env.t
     | AppR of exp list * Lattice.t * Lattice.t list * Env.t
     | Letrec of string * Address.t * exp * Env.t
+    | If of exp * exp * Env.t
   let compare x y = match x, y with
     | AppL (exps, env), AppL (exps', env') ->
       order_concat [lazy (Pervasives.compare exps exps');
@@ -174,6 +179,11 @@ module Frame = struct
                     lazy (Address.compare a a');
                     lazy (Pervasives.compare exp exp');
                     lazy (Pervasives.compare body body')]
+    | Letrec _, _ -> 1 | _, Letrec _ -> -1
+    | If (cons, alt, env), If (cons', alt', env') ->
+      order_concat [lazy (Pervasives.compare cons cons');
+                    lazy (Pervasives.compare alt alt');
+                    lazy (Env.compare env env')]
 end
 
 (** Continuations *)
@@ -290,6 +300,11 @@ module CESK = struct
       let kont = Kont.Cons (Frame.Letrec (x, a, body, env), ctx) in
       let kstore = KStore.join state.kstore ctx state.kont in
       [{control = Exp exp; env; store; kont; kstore; time = tick state}]
+    | Exp (If (cond, cons, alt)) ->
+      let ctx = Context.create (If (cond, cons, alt)) state.env state.store state.time in
+      let kont = Kont.Cons (Frame.If (cons, alt, state.env), ctx) in
+      let kstore = KStore.join state.kstore ctx state.kont in
+      [{state with control = Exp cond; kont; kstore; time = tick state}]
     | Val v -> begin match state.kont with
         | Kont.Empty -> [] (* Evaluation finished? *)
         | Kont.Cons (Frame.AppL (arg :: args, env), ctx) ->
@@ -329,6 +344,13 @@ module CESK = struct
               {state with control = Exp body; store; env; kont;
                           time = tick state})
             konts
+        | Kont.Cons (Frame.If (cons, alt, env), ctx) ->
+          let konts = KStore.lookup state.kstore ctx in
+          List.flatten (List.map (fun kont ->
+              (* TODO: refer to Value to know whether v is true or not *)
+              [{state with control = Exp cons; env; kont; time = tick state};
+               {state with control = Exp alt;  env; kont; time = tick state}])
+              konts)
       end
 
   (** Simple work-list state space exploration *)
@@ -358,8 +380,7 @@ module CESK = struct
 end
 
 let () =
-  let id1 = Abs (["x"], (Var "x")) in
-  let id2 = Abs (["y"], (Var "y")) in
-  let idid = Letrec ("f", id1, (App (Var "f", [Int 3]))) in
-  let finals = CESK.run idid in
+  let f = (Abs (["x"], If (Var "x", Var "x", Var "x"))) in
+  let exp = Letrec ("f", f, (App (Var "f", [Bool true]))) in
+  let finals = CESK.run exp in
   List.iter (fun state -> print_endline (State.to_string state)) finals
