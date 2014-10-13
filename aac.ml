@@ -1,9 +1,7 @@
 open Utils
 
 (* TODO:
-     - if
      - parser
-     - type lattice
      - initial environment
 *)
 
@@ -330,7 +328,7 @@ module CESK = struct
                          let (env'', store) = List.fold_left2 (fun (env, store) x v ->
                              let a = alloc state x in
                              (Env.extend env x a,
-                              Store.join state.store a v))
+                              Store.join store a v))
                              (env', state.store) xs args in
                          [{state with control = Exp body; env = env'';
                                       store; kont; time = tick state}]
@@ -380,7 +378,7 @@ module CESK = struct
 end
 
 let () =
-  let f = (Abs (["x"], If (Var "x", Var "x", Var "x"))) in
-  let exp = Letrec ("f", f, (App (Var "f", [Bool true]))) in
+  let f = (Abs (["x"; "y"], If (Var "x", Var "x", Var "y"))) in
+  let exp = Letrec ("f", f, (App (Var "f", [Bool true; Int 3]))) in
   let finals = CESK.run exp in
   List.iter (fun state -> print_endline (State.to_string state)) finals
