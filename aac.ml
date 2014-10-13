@@ -2,7 +2,6 @@ open Utils
 
 (* TODO:
      - if
-     - numeric & boolean values
      - parser
      - type lattice
      - initial environment
@@ -13,12 +12,16 @@ type var = string
 and lam = var list * exp
 and exp =
   | Var of var
+  | Int of int
+  | Bool of bool
   | App of exp * exp list
   | Abs of lam
   | Letrec of var * exp * exp
 
 let rec string_of_exp = function
   | Var x -> x
+  | Int n -> string_of_int n
+  | Bool b -> string_of_bool b
   | App (f, args) ->
     Printf.sprintf "(%s %s)" (string_of_exp f)
       (String.concat " " (List.map string_of_exp args))
@@ -68,12 +71,20 @@ module Env = MakeEnv(Address)
 module Value = struct
   type t =
     | Closure of lam * Env.t
+    | Num
+    | Bool
   let compare x y = match x, y with
     | Closure (lam, env), Closure (lam', env') ->
       order_concat [lazy (Pervasives.compare lam lam');
                     lazy (Env.compare env env')]
+    | Closure _, _ -> 1 | _, Closure _ -> -1
+    | Num, Num -> 0
+    | Num, _ -> 1 | _, Num -> -1
+    | Bool, Bool -> 0
   let to_string = function
     | Closure ((x, e), _) -> string_of_exp (Abs (x, e))
+    | Num -> "Num"
+    | Bool -> "Bool"
 end
 
 (** Lattice *)
@@ -259,6 +270,10 @@ module CESK = struct
     | Exp (Var x) ->
       let v = Store.lookup state.store (Env.lookup state.env x) in
       [{state with control = Val v; time = tick state}]
+    | Exp (Int _) ->
+      [{state with control = Val (Lattice.abst Value.Num); time = tick state}]
+    | Exp (Bool _) ->
+      [{state with control = Val (Lattice.abst Value.Bool); time = tick state}]
     | Exp (Abs lam) ->
       [{state with control = Val (Lattice.abst (Value.Closure (lam, state.env)));
                    time = tick state}]
@@ -274,7 +289,7 @@ module CESK = struct
       let store = Store.join state.store a Lattice.bot in
       let kont = Kont.Cons (Frame.Letrec (x, a, body, env), ctx) in
       let kstore = KStore.join state.kstore ctx state.kont in
-      [{state with control = Exp exp; env; store; kont; kstore; time = tick state}]
+      [{control = Exp exp; env; store; kont; kstore; time = tick state}]
     | Val v -> begin match state.kont with
         | Kont.Empty -> [] (* Evaluation finished? *)
         | Kont.Cons (Frame.AppL (arg :: args, env), ctx) ->
@@ -289,21 +304,23 @@ module CESK = struct
           let args = List.rev (v :: args') in
           let konts = KStore.lookup state.kstore ctx in
           List.flatten (List.map (fun kont ->
-              List.map (function
-                  | Value.Closure ((xs, body), env') ->
-                    if List.length xs != List.length args then
-                      failwith (Printf.sprintf
-                                  "Arity mismatch: expected %d argument, got %d"
-                                  (List.length xs) (List.length args))
-                    else
-                      let (env'', store) = List.fold_left2 (fun (env, store) x v ->
-                          let a = alloc state x in
-                          (Env.extend env x a,
-                           Store.join state.store a v))
-                          (env', state.store) xs args in
-                      {state with control = Exp body; env = env'';
-                                  store; kont; time = tick state})
-                (Lattice.conc clo))
+              List.flatten
+                (List.map (function
+                     | Value.Closure ((xs, body), env') ->
+                       if List.length xs != List.length args then
+                         failwith (Printf.sprintf
+                                     "Arity mismatch: expected %d argument, got %d"
+                                     (List.length xs) (List.length args))
+                       else
+                         let (env'', store) = List.fold_left2 (fun (env, store) x v ->
+                             let a = alloc state x in
+                             (Env.extend env x a,
+                              Store.join state.store a v))
+                             (env', state.store) xs args in
+                         [{state with control = Exp body; env = env'';
+                                      store; kont; time = tick state}]
+                     | _ -> [])
+                    (Lattice.conc clo)))
               konts)
         | Kont.Cons (Frame.Letrec (x, a, body, env), ctx) ->
           let store = Store.join state.store a v in
@@ -343,6 +360,6 @@ end
 let () =
   let id1 = Abs (["x"], (Var "x")) in
   let id2 = Abs (["y"], (Var "y")) in
-  let idid = Letrec ("f", id1, (App (Var "f", [Var "f"]))) in
+  let idid = Letrec ("f", id1, (App (Var "f", [Int 3]))) in
   let finals = CESK.run idid in
   List.iter (fun state -> print_endline (State.to_string state)) finals
