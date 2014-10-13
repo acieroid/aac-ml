@@ -95,6 +95,14 @@ module Value = struct
     | Num
     | Bool
     | Primitive of string
+
+  let is_true = function
+    | Bool -> true
+    | _ -> false
+  let is_false = function
+    | Bool -> true
+    | _ -> false
+
   let compare x y = match x, y with
     | Closure (lam, env), Closure (lam', env') ->
       order_concat [lazy (Pervasives.compare lam lam');
@@ -105,6 +113,7 @@ module Value = struct
     | Bool, Bool -> 0
     | Bool, _ -> 1 | _, Bool -> -1
     | Primitive x, Primitive y -> Pervasives.compare x y
+
   let to_string = function
     | Closure ((x, e), _) ->
       Printf.sprintf "#<clos %s>" (string_of_exp (Abs (x, e)))
@@ -112,6 +121,11 @@ module Value = struct
     | Bool -> "Bool"
     | Primitive x ->
       Printf.sprintf "#<prim %s>" x
+
+  let op = function
+    | "*" | "/" | "+" | "-" -> fun _ -> Num
+    | "=" | "<=" | ">=" | "<" | ">" -> fun _ -> Bool
+    | f -> failwith ("Unknown primitive: " ^ f)
 end
 
 (** Lattice *)
@@ -292,12 +306,6 @@ module CESK = struct
   let tick state = (state.time + 1) mod 1
   let alloc state x = Address.create state.time x
 
-  (** Primitive handling *)
-  let call_prim = function
-    | "*" | "/" | "+" | "-" -> fun _ -> Value.Num
-    | "=" | "<=" | ">=" | "<" | ">" -> fun _ -> Value.Bool
-    | f -> failwith ("Unknown primitive: " ^ f)
-
   (** Injection *)
   let inject exp =
     let primitives = ["*"; "/"; "+"; "-"; "="; "<="; ">="; "<"; ">"] in
@@ -311,6 +319,18 @@ module CESK = struct
       kont = Kont.Empty;
       time = 0;
       kstore = KStore.empty; }
+
+  (** Call a primitive with every possible argument value (of module Value) from
+      the information given by the lattice *)
+  let call_prim f args =
+    let rec build_args cur = function
+      | [] -> cur
+      | hd :: tl ->
+        build_args (List.flatten ((List.map (fun l ->
+            List.map (fun v -> v :: l) (Lattice.conc hd))
+            cur)))
+          tl in
+    List.map (fun revargs -> Value.op f (List.rev revargs)) (build_args [] args)
 
   (** Step function *)
   let step state = match state.control with
@@ -372,8 +392,11 @@ module CESK = struct
                          [{state with control = Exp body; env = env'';
                                       store; kont; time = tick state}]
                      | Value.Primitive f ->
-                       let res = call_prim f args in
-                       [{state with control = Val (Lattice.abst res); kont; time = tick state}]
+                       let results = call_prim f args in
+                       List.map (fun res ->
+                           {state with control = Val (Lattice.abst res); kont;
+                                       time = tick state})
+                         results
                      | Value.Num | Value.Bool -> [])
                     (Lattice.conc clo)))
               konts)
@@ -387,9 +410,17 @@ module CESK = struct
         | Kont.Cons (Frame.If (cons, alt, env), ctx) ->
           let konts = KStore.lookup state.kstore ctx in
           List.flatten (List.map (fun kont ->
-              (* TODO: refer to Value to know whether v is true or not *)
-              [{state with control = Exp cons; env; kont; time = tick state};
-               {state with control = Exp alt;  env; kont; time = tick state}])
+              let t = {state with control = Exp cons; env; kont; time = tick state}
+              and f = {state with control = Exp alt;  env; kont; time = tick state} in
+              List.flatten (List.map (fun v ->
+                  if Value.is_true v || Value.is_false v then
+                    [t; f]
+                  else if Value.is_true v then
+                    [t]
+                  else if Value.is_false v then
+                    [f]
+                  else
+                    []) (Lattice.conc v)))
               konts)
       end
 
@@ -408,7 +439,7 @@ module CESK = struct
           begin match step state with
             | [] ->
               Printf.printf "final state\n%!";
-              loop (StateSet.add state visited) rest (state :: finals) (* final state *)
+              loop (StateSet.add state visited) rest (state :: finals)
             | stepped ->
               Printf.printf "%s\n%!"
                 (String.concat ", " (List.map State.to_string stepped));
