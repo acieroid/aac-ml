@@ -2,7 +2,6 @@ open Utils
 
 (* TODO:
      - parser
-     - initial environment
 *)
 
 (** The language *)
@@ -75,6 +74,7 @@ module Value = struct
     | Closure of lam * Env.t
     | Num
     | Bool
+    | Primitive of string
   let compare x y = match x, y with
     | Closure (lam, env), Closure (lam', env') ->
       order_concat [lazy (Pervasives.compare lam lam');
@@ -83,10 +83,15 @@ module Value = struct
     | Num, Num -> 0
     | Num, _ -> 1 | _, Num -> -1
     | Bool, Bool -> 0
+    | Bool, _ -> 1 | _, Bool -> -1
+    | Primitive x, Primitive y -> Pervasives.compare x y
   let to_string = function
-    | Closure ((x, e), _) -> string_of_exp (Abs (x, e))
+    | Closure ((x, e), _) ->
+      Printf.sprintf "#<clos %s>" (string_of_exp (Abs (x, e)))
     | Num -> "Num"
     | Bool -> "Bool"
+    | Primitive x ->
+      Printf.sprintf "#<prim %s>" x
 end
 
 (** Lattice *)
@@ -207,7 +212,7 @@ module KStore : sig
 end = struct
   module M = Map.Make(Context)
   module S = Set.Make(Kont)
-  type t = S.t M.t (* TODO: set *)
+  type t = S.t M.t
   let empty = M.empty
   let lookup kstore ctx = try S.elements (M.find ctx kstore) with
     | Not_found -> failwith "Continuation not found"
@@ -242,6 +247,7 @@ module State = struct
     time : int;
     kstore : KStore.t;
   }
+
   let compare state state' =
     order_concat [lazy (Control.compare state.control state'.control);
                   lazy (Env.compare state.env state'.env);
@@ -249,14 +255,7 @@ module State = struct
                   lazy (Kont.compare state.kont state'.kont);
                   lazy (Pervasives.compare state.time state'.time); (* TODO *)
                   lazy (KStore.compare state.kstore state'.kstore)]
-  let inject exp = {
-    control = Control.Exp exp;
-    env = Env.empty;
-    store = Store.empty;
-    kont = Kont.Empty;
-    time = 0;
-    kstore = KStore.empty;
-  }
+
   let to_string state = match state.control with
     | Control.Val v -> Lattice.to_string v
     | Control.Exp e -> string_of_exp e
@@ -272,6 +271,26 @@ module CESK = struct
   (** Tick and alloc implementations *)
   let tick state = state.time + 1
   let alloc state x = Address.create state.time x
+
+  (** Primitive handling *)
+  let call_prim = function
+    | "*" | "/" | "+" | "-" -> fun _ -> Value.Num
+    | "=" | "<=" | ">=" | "<" | ">" -> fun _ -> Value.Bool
+    | f -> failwith ("Unknown primitive: " ^ f)
+
+  (** Injection *)
+  let inject exp =
+    let primitives = ["*"; "/"; "+"; "-"; "="; "<="; ">="; "<"; ">"] in
+    let env, store = List.fold_left (fun (env, store) name ->
+        let a = Address.create 0 name in
+        (Env.extend env name a, Store.join store a (Lattice.abst (Value.Primitive name))))
+        (Env.empty, Store.empty) primitives in
+    { control = Control.Exp exp;
+      env = env;
+      store = store;
+      kont = Kont.Empty;
+      time = 0;
+      kstore = KStore.empty; }
 
   (** Step function *)
   let step state = match state.control with
@@ -332,7 +351,10 @@ module CESK = struct
                              (env', state.store) xs args in
                          [{state with control = Exp body; env = env'';
                                       store; kont; time = tick state}]
-                     | _ -> [])
+                     | Value.Primitive f ->
+                       let res = call_prim f args in
+                       [{state with control = Val (Lattice.abst res); kont; time = tick state}]
+                     | Value.Num | Value.Bool -> [])
                     (Lattice.conc clo)))
               konts)
         | Kont.Cons (Frame.Letrec (x, a, body, env), ctx) ->
@@ -378,7 +400,7 @@ module CESK = struct
 end
 
 let () =
-  let f = (Abs (["x"; "y"], If (Var "x", Var "x", Var "y"))) in
+  let f = (Abs (["x"; "y"], (App (Var "<", [Int 3; Int 4])))) in
   let exp = Letrec ("f", f, (App (Var "f", [Bool true; Int 3]))) in
   let finals = CESK.run exp in
   List.iter (fun state -> print_endline (State.to_string state)) finals
