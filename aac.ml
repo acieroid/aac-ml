@@ -33,6 +33,30 @@ let rec string_of_exp = function
     Printf.sprintf "(if %s %s %s)"
       (string_of_exp cond) (string_of_exp cons) (string_of_exp alt)
 
+let parse s =
+  let rec aux (x : CCSexp.t) = match x with
+    | `Atom "#t" -> Bool true
+    | `Atom "#f" -> Bool false
+    | `Atom x -> begin try Int (int_of_string x) with
+        | Failure "int_of_string" -> Var x
+      end
+    | `List [`Atom "lambda"; `List args; body] ->
+      Abs (List.map (function
+          | `Atom v -> v
+          | e -> failwith ("invalid argument: " ^ (CCSexp.to_string e)))
+          args, aux body)
+    | `List [`Atom "letrec"; `List [`List [`Atom v; exp]]; body] ->
+      Letrec (v, aux exp, aux body)
+    | `List [`Atom "if"; cond; cons; alt] ->
+      If (aux cond, aux cons, aux alt)
+    | `List (f :: args) ->
+      App (aux f, List.map aux args)
+    | e -> failwith ("Cannot parse " ^ (CCSexp.to_string e))
+  in match CCSexp.ParseGen.to_list (CCSexp.parse_string s) with
+  | `Error err -> failwith err
+  | `Ok [] -> failwith "empty source"
+  | `Ok (l :: _) -> aux (l : CCSexp.t)
+
 (** Addresses *)
 module type AddressSignature = sig
   type t
@@ -400,7 +424,7 @@ module CESK = struct
 end
 
 let () =
-  let f = (Abs (["x"; "y"], (App (Var "<", [Int 3; Int 4])))) in
-  let exp = Letrec ("f", f, (App (Var "f", [Bool true; Int 3]))) in
-  let finals = CESK.run exp in
+  let simple = parse "(letrec ((f (lambda (x y) (if x x y)))) (f #t 3))" in
+  let sq = parse "((lambda (x) (* x x)) 8)" in
+  let finals = CESK.run sq in
   List.iter (fun state -> print_endline (State.to_string state)) finals
