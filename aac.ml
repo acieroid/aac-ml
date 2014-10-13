@@ -90,41 +90,45 @@ module Env = MakeEnv(Address)
 
 (** Values *)
 module Value = struct
-  type t =
-    | Closure of lam * Env.t
-    | Num
-    | Bool
-    | Primitive of string
+  type t = [
+    | `Closure of lam * Env.t
+    | `Num
+    | `Bool
+    | `Primitive of string
+    ]
 
   let is_true = function
-    | Bool -> true
+    | `Bool -> true
     | _ -> false
   let is_false = function
-    | Bool -> true
+    | `Bool -> true
     | _ -> false
 
+  let bool _ = `Bool
+  let num _ = `Num
+
   let compare x y = match x, y with
-    | Closure (lam, env), Closure (lam', env') ->
+    | `Closure (lam, env), `Closure (lam', env') ->
       order_concat [lazy (Pervasives.compare lam lam');
                     lazy (Env.compare env env')]
-    | Closure _, _ -> 1 | _, Closure _ -> -1
-    | Num, Num -> 0
-    | Num, _ -> 1 | _, Num -> -1
-    | Bool, Bool -> 0
-    | Bool, _ -> 1 | _, Bool -> -1
-    | Primitive x, Primitive y -> Pervasives.compare x y
+    | `Closure _, _ -> 1 | _, `Closure _ -> -1
+    | `Num, `Num -> 0
+    | `Num, _ -> 1 | _, `Num -> -1
+    | `Bool, `Bool -> 0
+    | `Bool, _ -> 1 | _, `Bool -> -1
+    | `Primitive x, `Primitive y -> Pervasives.compare x y
 
   let to_string = function
-    | Closure ((x, e), _) ->
+    | `Closure ((x, e), _) ->
       Printf.sprintf "#<clos %s>" (string_of_exp (Abs (x, e)))
-    | Num -> "Num"
-    | Bool -> "Bool"
-    | Primitive x ->
+    | `Num -> "Num"
+    | `Bool -> "Bool"
+    | `Primitive x ->
       Printf.sprintf "#<prim %s>" x
 
   let op = function
-    | "*" | "/" | "+" | "-" -> fun _ -> Num
-    | "=" | "<=" | ">=" | "<" | ">" -> fun _ -> Bool
+    | "*" | "/" | "+" | "-" -> fun _ -> `Num
+    | "=" | "<=" | ">=" | "<" | ">" -> fun _ -> `Bool
     | f -> failwith ("Unknown primitive: " ^ f)
 end
 
@@ -311,7 +315,7 @@ module CESK = struct
     let primitives = ["*"; "/"; "+"; "-"; "="; "<="; ">="; "<"; ">"] in
     let env, store = List.fold_left (fun (env, store) name ->
         let a = Address.create 0 name in
-        (Env.extend env name a, Store.join store a (Lattice.abst (Value.Primitive name))))
+        (Env.extend env name a, Store.join store a (Lattice.abst (`Primitive name))))
         (Env.empty, Store.empty) primitives in
     { control = Control.Exp exp;
       env = env;
@@ -337,12 +341,12 @@ module CESK = struct
     | Exp (Var x) ->
       let v = Store.lookup state.store (Env.lookup state.env x) in
       [{state with control = Val v; time = tick state}]
-    | Exp (Int _) ->
-      [{state with control = Val (Lattice.abst Value.Num); time = tick state}]
-    | Exp (Bool _) ->
-      [{state with control = Val (Lattice.abst Value.Bool); time = tick state}]
+    | Exp (Int n) ->
+      [{state with control = Val (Lattice.abst (Value.num n)); time = tick state}]
+    | Exp (Bool b) ->
+      [{state with control = Val (Lattice.abst (Value.bool b)); time = tick state}]
     | Exp (Abs lam) ->
-      [{state with control = Val (Lattice.abst (Value.Closure (lam, state.env)));
+      [{state with control = Val (Lattice.abst (`Closure (lam, state.env)));
                    time = tick state}]
     | Exp (App (f, args)) ->
       let ctx = Context.create (App (f, args)) state.env state.store state.time in
@@ -378,7 +382,7 @@ module CESK = struct
           List.flatten (List.map (fun kont ->
               List.flatten
                 (List.map (function
-                     | Value.Closure ((xs, body), env') ->
+                     | `Closure ((xs, body), env') ->
                        if List.length xs != List.length args then
                          failwith (Printf.sprintf
                                      "Arity mismatch: expected %d argument, got %d"
@@ -391,13 +395,13 @@ module CESK = struct
                              (env', state.store) xs args in
                          [{state with control = Exp body; env = env'';
                                       store; kont; time = tick state}]
-                     | Value.Primitive f ->
+                     | `Primitive f ->
                        let results = call_prim f args in
                        List.map (fun res ->
                            {state with control = Val (Lattice.abst res); kont;
                                        time = tick state})
                          results
-                     | Value.Num | Value.Bool -> [])
+                     | _ -> [])
                     (Lattice.conc clo)))
               konts)
         | Kont.Cons (Frame.Letrec (x, a, body, env), ctx) ->
