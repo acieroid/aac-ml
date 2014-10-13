@@ -1,9 +1,5 @@
 open Utils
 
-(* TODO:
-     - parser
-*)
-
 (** The language *)
 type var = string
 and lam = var list * exp
@@ -293,7 +289,7 @@ module CESK = struct
   open Control
 
   (** Tick and alloc implementations *)
-  let tick state = state.time + 1
+  let tick state = (state.time + 1) mod 1
   let alloc state x = Address.create state.time x
 
   (** Primitive handling *)
@@ -426,5 +422,10 @@ end
 let () =
   let simple = parse "(letrec ((f (lambda (x y) (if x x y)))) (f #t 3))" in
   let sq = parse "((lambda (x) (* x x)) 8)" in
-  let finals = CESK.run sq in
+  let loopy1 = parse "(letrec ((f (lambda (x) (f x)))) (f 1))" in
+  let loopy2 = parse "((lambda (x) (x x)) (lambda (y) (y y)))" in
+  let fac = parse "(letrec ((fac (lambda (n) (if (= n 0) 1 (* n (fac (- n 1))))))) (fac 8))" in
+  let fib = parse "(letrec ((fib (lambda (n) (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2))))))) (fib 8))" in
+  let safeloopy1 = parse "(letrec ((count (lambda (n) (letrec ((t (= n 0))) (if t 123 (letrec ((u (- n 1))) (letrec ((v (count u))) v))))))) (count 8))" in
+  let finals = CESK.run safeloopy1 in
   List.iter (fun state -> print_endline (State.to_string state)) finals
