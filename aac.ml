@@ -1,7 +1,6 @@
 open Utils
 
 (* TODO:
-     - let
      - if
      - numeric & boolean values
      - parser
@@ -16,6 +15,7 @@ and exp =
   | Var of var
   | App of exp * exp list
   | Abs of lam
+  | Letrec of var * exp * exp
 
 let rec string_of_exp = function
   | Var x -> x
@@ -25,6 +25,9 @@ let rec string_of_exp = function
   | Abs (args, e) ->
     Printf.sprintf "(lambda (%s) %s)" (String.concat " " args)
       (string_of_exp e)
+  | Letrec (x, e, body) ->
+    Printf.sprintf "(letrec ((%s %s)) %s)" x (string_of_exp e)
+      (string_of_exp body)
 
 (** Addresses *)
 module type AddressSignature = sig
@@ -143,6 +146,7 @@ module Frame = struct
   type t =
     | AppL of exp list * Env.t
     | AppR of exp list * Lattice.t * Lattice.t list * Env.t
+    | Letrec of string * Address.t * exp * Env.t
   let compare x y = match x, y with
     | AppL (exps, env), AppL (exps', env') ->
       order_concat [lazy (Pervasives.compare exps exps');
@@ -153,6 +157,12 @@ module Frame = struct
                     lazy (Lattice.compare f f');
                     lazy (compare_list Lattice.compare vs vs');
                     lazy (Env.compare env env')]
+    | AppR _, _ -> 1 | _, AppR _ -> -1
+    | Letrec (x, a, exp, body), Letrec (x', a', exp', body') ->
+      order_concat [lazy (Pervasives.compare x x');
+                    lazy (Address.compare a a');
+                    lazy (Pervasives.compare exp exp');
+                    lazy (Pervasives.compare body body')]
 end
 
 (** Continuations *)
@@ -254,9 +264,17 @@ module CESK = struct
                    time = tick state}]
     | Exp (App (f, args)) ->
       let ctx = Context.create (App (f, args)) state.env state.store state.time in
-      let kont = Kont.Cons ((Frame.AppL (args, state.env)), ctx) in
+      let kont = Kont.Cons (Frame.AppL (args, state.env), ctx) in
       let kstore = KStore.join state.kstore ctx state.kont in
       [{state with control = Exp f; kont; kstore; time = tick state}]
+    | Exp (Letrec (x, exp, body)) ->
+      let ctx = Context.create (Letrec (x, exp, body)) state.env state.store state.time in
+      let a = alloc state x in
+      let env = Env.extend state.env x a in
+      let store = Store.join state.store a Lattice.bot in
+      let kont = Kont.Cons (Frame.Letrec (x, a, body, env), ctx) in
+      let kstore = KStore.join state.kstore ctx state.kont in
+      [{state with control = Exp exp; env; store; kont; kstore; time = tick state}]
     | Val v -> begin match state.kont with
         | Kont.Empty -> [] (* Evaluation finished? *)
         | Kont.Cons (Frame.AppL (arg :: args, env), ctx) ->
@@ -283,10 +301,17 @@ module CESK = struct
                           (Env.extend env x a,
                            Store.join state.store a v))
                           (env', state.store) xs args in
-                    {state with control = Exp body; env = env'';
-                                store; kont; time = tick state})
+                      {state with control = Exp body; env = env'';
+                                  store; kont; time = tick state})
                 (Lattice.conc clo))
               konts)
+        | Kont.Cons (Frame.Letrec (x, a, body, env), ctx) ->
+          let store = Store.join state.store a v in
+          let konts = KStore.lookup state.kstore ctx in
+          List.map (fun kont ->
+              {state with control = Exp body; store; env; kont;
+                          time = tick state})
+            konts
       end
 
   (** Simple work-list state space exploration *)
@@ -318,6 +343,6 @@ end
 let () =
   let id1 = Abs (["x"], (Var "x")) in
   let id2 = Abs (["y"], (Var "y")) in
-  let idid = (App (id1, [id2])) in
+  let idid = Letrec ("f", id1, (App (Var "f", [Var "f"]))) in
   let finals = CESK.run idid in
   List.iter (fun state -> print_endline (State.to_string state)) finals
