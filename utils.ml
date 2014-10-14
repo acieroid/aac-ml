@@ -24,3 +24,6 @@ let compare_list cmp l1 l2 =
                     (List.combine l1 l2))
   else
     l
+
+let string_of_list eltf l =
+  "[" ^ (String.concat ", " (List.map eltf l)) ^ "]"

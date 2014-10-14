@@ -169,34 +169,38 @@ module ConcreteValue = struct
     | `Primitive x ->
       Printf.sprintf "#<prim %s>" x
 
-  let arith f x y = match x, y with
-    | `Int n, `Int n' -> `Int (f n n')
-    | _, _ -> failwith ("Invalid arithmetic arguments: " ^ (to_string x) ^
-                        ", " ^ (to_string y))
+  let arith name f x y = match x, y with
+    | `Int n, `Int n' ->
+      `Int (f n n')
+    | _, _ -> failwith (Printf.sprintf "Invalid arithmetic arguments to %s: %s, %s: "
+                          name (to_string x) (to_string y))
 
-  let cmp f = function
+  let cmp name f = function
     | [`Int n; `Int n'] -> `Bool (f n n')
-    | [x; y] -> failwith ("Invalid argument types: " ^ (to_string x) ^
-                          ", " ^ (to_string y))
-    | _ -> failwith ("Invalid number of arguments for a comparison operator (expected 2)")
+    | [x; y] -> failwith (Printf.sprintf "Invalid argument types for %s: %s, %s"
+                            name (to_string x) (to_string y))
+    | n -> failwith (Printf.sprintf "Invalid number of arguments for a comparison operator (expected 2, got %d)"
+                       (List.length n))
 
-  let op = function
-    | "*" -> fun args -> List.fold_left (arith ( * )) (`Int 1) args
-    | "+" -> fun args -> List.fold_left (arith (+)) (`Int 1) args
+  let op name =
+    match name with
+    | "*" -> fun args -> List.fold_left (arith "*" ( * )) (`Int 1) args
+    | "+" -> fun args -> List.fold_left (arith "+" (+)) (`Int 0) args
     | "-" -> begin function
         | [] -> failwith "Invalid number of arguments for -"
-        | [arg] -> arith (-) (`Int 0) arg
-        | arg :: args -> List.fold_left (arith (-)) arg args
+        | [arg] -> arith "-" (-) (`Int 0) arg
+        | arg :: args -> List.fold_left (arith "-" (-)) arg args
       end
     | "/" -> begin function
         | [] -> failwith "Invalid number of arguments for /"
-        | [arg] -> arith (/) (`Int 1) arg
-        | arg :: args -> List.fold_left (arith (/)) arg args
+        | [arg] -> arith "/" (/) (`Int 1) arg
+        | arg :: args -> List.fold_left (arith "/" (/)) arg args
       end
-    | ">" -> cmp (>)
-    | ">=" -> cmp (>=)
-    | "<" -> cmp (<)
-    | "<=" -> cmp (<=)
+    | ">" -> cmp ">" (>)
+    | ">=" -> cmp ">=" (>=)
+    | "<" -> cmp "<" (<)
+    | "<=" -> cmp "<=" (<=)
+    | "=" -> cmp "=" (=)
     | f -> failwith ("Unknown primitive: " ^ f)
 end
 
@@ -377,7 +381,7 @@ module CESK = struct
   open Control
 
   (** Tick and alloc implementations *)
-  let tick state = (state.time + 1) mod 1
+  let tick state = (state.time + 1) mod 20
   let alloc state x = Address.create state.time x
 
   (** Injection *)
@@ -404,7 +408,8 @@ module CESK = struct
             List.map (fun v -> v :: l) (Lattice.conc hd))
             cur)))
           tl in
-    List.map (fun revargs -> Value.op f (List.rev revargs)) (build_args [] args)
+    let args' = build_args [[]] args in
+    List.map (fun revargs -> Value.op f (List.rev revargs)) args'
 
   (** Step function *)
   let step state = match state.control with
@@ -531,6 +536,7 @@ let run name source =
 
 
 let () =
+  run "add" "(+ 1 2)";
   run "simple" "(letrec ((f (lambda (x y) (if x x y)))) (f #t 3))";
   run "sq" "((lambda (x) (* x x)) 8)";
   run "loopy1" "(letrec ((f (lambda (x) (f x)))) (f 1))";
