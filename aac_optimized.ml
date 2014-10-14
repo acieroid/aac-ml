@@ -259,19 +259,21 @@ module Store = MakeStore(Address)
 (** Contexts *)
 module Context = struct
   type t = {
-    exp : exp;
+    lam : lam;
     env : Env.t;
+    vals : Lattice.t list;
     store : Store.t;
-    time : int; (* TODO *)
   }
   let compare ctx ctx' =
-    order_concat [lazy (Pervasives.compare ctx.exp ctx'.exp);
+    order_concat [lazy (Pervasives.compare ctx.lam ctx'.lam);
                   lazy (Env.compare ctx.env ctx'.env);
+                  lazy (compare_list Lattice.compare ctx.vals ctx'.vals);
                   lazy (Store.compare ctx.store ctx'.store)]
   let hash = Hashtbl.hash
-  let create exp env store time = {exp; env; store; time}
+  let create lam env vals store = {lam; env; vals; store}
   let to_string ctx =
-    Printf.sprintf "ctx(%s, %s)" (string_of_exp ctx.exp) (string_of_int ctx.time)
+    Printf.sprintf "ctx(%s, %s)" (Value.to_string (`Closure (ctx.lam, ctx.env)))
+      (string_of_list Lattice.to_string ctx.vals)
 end
 
 (** Frames *)
@@ -308,25 +310,42 @@ end
 module Kont = struct
   type t =
     | Empty
-    | Cons of Frame.t * Context.t
+    | Ctx of Context.t
   let compare x y = match x, y with
     | Empty, Empty -> 0
     | Empty, _ -> 1 | _, Empty -> -1
-    | Cons (f, ctx), Cons (f', ctx') ->
-      order_concat [lazy (Frame.compare f f');
-                    lazy (Context.compare ctx ctx')]
+    | Ctx ctx, Ctx ctx' ->
+      Context.compare ctx ctx'
 end
 
-(** Continuation store *)
+(** Local continuations *)
+module LKont = struct
+  type t = Frame.t list
+  let empty = []
+  let is_empty = function
+    | [] -> true
+    | _ -> false
+  let push f lk = f :: lk
+  let compare = compare_list Frame.compare
+end
+
+(** Continuation store that maps contexts to a pair of
+    local continuation and and (normal) continuation *)
 module KStore : sig
   type t
   val empty : t
-  val lookup : t -> Context.t -> Kont.t list
-  val join : t -> Context.t -> Kont.t -> t
+  val lookup : t -> Context.t -> (LKont.t * Kont.t) list
+  val join : t -> Context.t -> (LKont.t * Kont.t) -> t
   val compare : t -> t -> int
 end = struct
   module M = Map.Make(Context)
-  module S = Set.Make(Kont)
+  module Pair = struct
+    type t = LKont.t * Kont.t
+    let compare (lk, k) (lk', k') =
+      order_concat [lazy (LKont.compare lk lk');
+                    lazy (Kont.compare k k')]
+  end
+  module S = Set.Make(Pair)
   type t = S.t M.t
   let empty = M.empty
   let lookup kstore ctx = try S.elements (M.find ctx kstore) with
@@ -358,6 +377,7 @@ module State = struct
     control : Control.t;
     env : Env.t;
     store : Store.t;
+    lkont : LKont.t;
     kont : Kont.t;
     time : int;
     kstore : KStore.t;
@@ -367,6 +387,7 @@ module State = struct
     order_concat [lazy (Control.compare state.control state'.control);
                   lazy (Env.compare state.env state'.env);
                   lazy (Store.compare state.store state'.store);
+                  lazy (LKont.compare state.lkont state'.lkont);
                   lazy (Kont.compare state.kont state'.kont);
                   lazy (Pervasives.compare state.time state'.time); (* TODO *)
                   lazy (KStore.compare state.kstore state'.kstore)]
@@ -450,6 +471,7 @@ module CESK = struct
     { control = Control.Exp exp;
       env = env;
       store = store;
+      lkont = LKont.empty;
       kont = Kont.Empty;
       time = 0;
       kstore = KStore.empty; }
@@ -467,7 +489,85 @@ module CESK = struct
     let args' = build_args [[]] args in
     List.map (fun revargs -> Value.op f (List.rev revargs)) args'
 
-  (** Step function *)
+  (** Implementation of pop as defined in the paper *)
+  module ContextSet = Set.Make(Context)
+  let pop lkont kont kstore =
+    let rec pop' lkont kont g = match lkont, kont with
+      | [], Kont.Empty -> []
+      | f :: lkont', k -> [(f, lkont', k)]
+      | [], Kont.Ctx ctx ->
+        let (part1, g') = List.fold_left (fun (s, g') -> function
+            | [], Kont.Ctx ctx when not (ContextSet.mem ctx g) ->
+              (s, ContextSet.add ctx g')
+              | [], Kont.Ctx _ | [], Kont.Empty -> (s, g')
+            | f :: lk, k -> ((f, lk, k) :: s, g'))
+            ([], ContextSet.empty) (KStore.lookup kstore ctx) in
+        let gug' = ContextSet.union g g' in
+        let part2 = List.flatten (List.map (fun ctx' -> pop' [] (Kont.Ctx ctx') gug')
+                                    (ContextSet.elements g')) in
+        part1 @ part2 (* TODO: remove duplicates *) in
+    pop' lkont kont ContextSet.empty
+
+  (** Step functions *)
+  let step_kont state v frame lkont kont = match frame with
+    | Frame.AppL (arg :: args, env) ->
+      let lkont = LKont.push (Frame.AppR (args, v, [], env)) lkont in
+      [{state with control = Exp arg; env; lkont; kont}]
+    | Frame.AppL ([], env) ->
+      failwith "TODO: functions with 0 arguments not yet implemented"
+    | Frame.AppR (arg :: args, clo, argsv, env) ->
+      let lkont = LKont.push (Frame.AppR (args, clo, v :: argsv, env)) lkont in
+      [{state with control = Exp arg; env; lkont; kont}]
+    | Frame.AppR ([], clo, args', env) ->
+      let args = List.rev (v :: args') in
+      List.flatten (List.map (function
+          | `Closure ((xs, body), env') ->
+            (* the only tricky case: we need to push the local continuation in
+               the continuation store, and then replace the local cont by an
+               empty one *)
+
+            if List.length xs != List.length args then
+              failwith (Printf.sprintf
+                          "Arity mismatch: expected %d argument, got %d"
+                          (List.length xs) (List.length args))
+            else
+              let (env'', store) = List.fold_left2 (fun (env, store) x v ->
+                  let a = alloc state x in
+                  (Env.extend env x a,
+                   Store.join store a v))
+                  (env', state.store) xs args in
+              let ctx = Context.create (xs, body) env' args state.store in
+              let kstore = KStore.join state.kstore ctx (state.lkont, state.kont) in
+              [{control = Exp body; env = env''; store; kstore;
+                lkont = LKont.empty; kont = Kont.Ctx ctx; time = tick state}]
+          | `Primitive f ->
+            (* in the case of a primitive call, we don't need to step into a
+               function's body and can therefore leave the stack unchanged
+               (except for the pop) *)
+            let results = call_prim f args in
+            List.map (fun res ->
+                {state with control = Val (Lattice.abst res); lkont; kont;
+                            time = tick state})
+              results
+          | _ -> [])
+          (Lattice.conc clo))
+    | Frame.Letrec (x, a, body, env) ->
+      let store = Store.join state.store a v in
+      [{state with control = Exp body; store; env; lkont; kont;
+                   time = tick state}]
+    | Frame.If (cons, alt, env) ->
+      let t = {state with control = Exp cons; env; lkont; kont; time = tick state}
+      and f = {state with control = Exp alt;  env; lkont; kont; time = tick state} in
+      List.flatten (List.map (fun v ->
+          if Value.is_true v && Value.is_false v then
+            [t; f]
+          else if Value.is_true v then
+            [t]
+          else if Value.is_false v then
+            [f]
+          else
+            []) (Lattice.conc v))
+
   let step state = match state.control with
     | Exp (Var x) ->
       let v = Store.lookup state.store (Env.lookup state.env x) in
@@ -480,84 +580,22 @@ module CESK = struct
       [{state with control = Val (Lattice.abst (`Closure (lam, state.env)));
                    time = tick state}]
     | Exp (App (f, args)) ->
-      let ctx = Context.create (App (f, args)) state.env state.store state.time in
-      let kont = Kont.Cons (Frame.AppL (args, state.env), ctx) in
-      let kstore = KStore.join state.kstore ctx state.kont in
-      [{state with control = Exp f; kont; kstore; time = tick state}]
+      let lkont = LKont.push (Frame.AppL (args, state.env)) state.lkont in
+      [{state with control = Exp f; lkont; time = tick state}]
     | Exp (Letrec (x, exp, body)) ->
-      let ctx = Context.create (Letrec (x, exp, body)) state.env state.store state.time in
       let a = alloc state x in
       let env = Env.extend state.env x a in
       let store = Store.join state.store a Lattice.bot in
-      let kont = Kont.Cons (Frame.Letrec (x, a, body, env), ctx) in
-      let kstore = KStore.join state.kstore ctx state.kont in
-      [{control = Exp exp; env; store; kont; kstore; time = tick state}]
+      let lkont = LKont.push (Frame.Letrec (x, a, body, env)) state.lkont in
+      [{state with control = Exp exp; env; store; lkont; time = tick state}]
     | Exp (If (cond, cons, alt)) ->
-      let ctx = Context.create (If (cond, cons, alt)) state.env state.store state.time in
-      let kont = Kont.Cons (Frame.If (cons, alt, state.env), ctx) in
-      let kstore = KStore.join state.kstore ctx state.kont in
-      [{state with control = Exp cond; kont; kstore; time = tick state}]
-    | Val v -> begin match state.kont with
-        | Kont.Empty -> [] (* Evaluation finished? *)
-        | Kont.Cons (Frame.AppL (arg :: args, env), ctx) ->
-          let kont = Kont.Cons (Frame.AppR (args, v, [], env), ctx) in
-          [{state with control = Exp arg; env; kont}]
-        | Kont.Cons (Frame.AppL ([], env), ctx) ->
-          failwith "TODO: functions with 0 arguments are NYI"
-        | Kont.Cons (Frame.AppR (arg :: args, clo, argsv, env), ctx) ->
-          let kont = Kont.Cons (Frame.AppR (args, clo, v :: argsv, env), ctx) in
-          [{state with control = Exp arg; env; kont}]
-        | Kont.Cons (Frame.AppR ([], clo, args', env), ctx) ->
-          let args = List.rev (v :: args') in
-          let konts = KStore.lookup state.kstore ctx in
-          List.flatten (List.map (fun kont ->
-              List.flatten
-                (List.map (function
-                     | `Closure ((xs, body), env') ->
-                       if List.length xs != List.length args then
-                         failwith (Printf.sprintf
-                                     "Arity mismatch: expected %d argument, got %d"
-                                     (List.length xs) (List.length args))
-                       else
-                         let (env'', store) = List.fold_left2 (fun (env, store) x v ->
-                             let a = alloc state x in
-                             (Env.extend env x a,
-                              Store.join store a v))
-                             (env', state.store) xs args in
-                         [{state with control = Exp body; env = env'';
-                                      store; kont; time = tick state}]
-                     | `Primitive f ->
-                       let results = call_prim f args in
-                       List.map (fun res ->
-                           {state with control = Val (Lattice.abst res); kont;
-                                       time = tick state})
-                         results
-                     | _ -> [])
-                    (Lattice.conc clo)))
-              konts)
-        | Kont.Cons (Frame.Letrec (x, a, body, env), ctx) ->
-          let store = Store.join state.store a v in
-          let konts = KStore.lookup state.kstore ctx in
-          List.map (fun kont ->
-              {state with control = Exp body; store; env; kont;
-                          time = tick state})
-            konts
-        | Kont.Cons (Frame.If (cons, alt, env), ctx) ->
-          let konts = KStore.lookup state.kstore ctx in
-          List.flatten (List.map (fun kont ->
-              let t = {state with control = Exp cons; env; kont; time = tick state}
-              and f = {state with control = Exp alt;  env; kont; time = tick state} in
-              List.flatten (List.map (fun v ->
-                  if Value.is_true v && Value.is_false v then
-                    [t; f]
-                  else if Value.is_true v then
-                    [t]
-                  else if Value.is_false v then
-                    [f]
-                  else
-                    []) (Lattice.conc v)))
-              konts)
-      end
+      let lkont = LKont.push (Frame.If (cons, alt, state.env)) state.lkont in
+      [{state with control = Exp cond; lkont; time = tick state}]
+    | Val v ->
+      let popped = pop state.lkont state.kont state.kstore in
+      List.flatten (List.map (fun (frame, lkont, kont) ->
+          step_kont state v frame lkont kont)
+          popped)
 
   (** Simple work-list state space exploration *)
   let run exp =
@@ -593,11 +631,16 @@ let run name source =
                                      (List.map State.to_string finals));
   Graph.output graph (name ^ ".dot")
 
+
 let () =
-  run "simple" "(letrec ((f (lambda (x y) (if x x y)))) (f #t 3))";
+  (* run "add" "(+ 1 2)";
+  run "letrec" "(letrec ((x 1)) x)";
+  run "if" "(if #t 1 2)"; *)
+  run "fun" "((lambda (x) #t) 1)"
+  (* run "simple" "(letrec ((f (lambda (x y) (if x x y)))) (f #t 3))";
   run "sq" "((lambda (x) (* x x)) 8)";
   run "loopy1" "(letrec ((f (lambda (x) (f x)))) (f 1))";
   run "loopy2" "((lambda (x) (x x)) (lambda (y) (y y)))";
   run "fac" "(letrec ((fac (lambda (n) (if (= n 0) 1 (* n (fac (- n 1))))))) (fac 8))";
   run "fib" "(letrec ((fib (lambda (n) (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2))))))) (fib 8))";
-  run "safeloopy1" "(letrec ((count (lambda (n) (letrec ((t (= n 0))) (if t 123 (letrec ((u (- n 1))) (letrec ((v (count u))) v))))))) (count 8))"
+  run "safeloopy1" "(letrec ((count (lambda (n) (letrec ((t (= n 0))) (if t 123 (letrec ((u (- n 1))) (letrec ((v (count u))) v))))))) (count 8))" *)
