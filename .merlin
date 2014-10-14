@@ -1,3 +1,5 @@
 S .
 B _build
 PKG containers
+PKG batteries
+PKG ocamlgraph

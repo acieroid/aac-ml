@@ -379,6 +379,55 @@ end
 
 module StateSet = Set.Make(State)
 
+(** Graph-generation *)
+module Graph = struct
+  module G = Graph.Persistent.Digraph.ConcreteBidirectional(struct
+      include State
+      let hash = Hashtbl.hash
+      let equal x y = compare x y == 0
+    end)
+
+  module DotArg = struct
+    include G
+    (* Hack to avoid merging similar states, due to an ocamlgraph bug *)
+    module StateMap = Map.Make(State)
+    let id = ref 0
+    let new_id () =
+      id := !id + 1;
+      !id
+    let nodes = ref StateMap.empty
+    let node_id node =
+      if StateMap.mem node !nodes then
+        StateMap.find node !nodes
+      else
+        let id = new_id () in
+        nodes := StateMap.add node id !nodes;
+        id
+
+    let edge_attributes (_ : G.E.t) = []
+    let default_edge_attributes _ = []
+    let get_subgraph _ = None
+    let vertex_name (state : G.V.t) =
+      (string_of_int (node_id state))
+    let vertex_attributes (state : G.V.t) =
+      [`Label (BatString.slice ~last:20 (State.to_string state));
+       `Style `Filled]
+    let default_vertex_attributes _ = []
+    let graph_attributes _ = []
+  end
+
+  module Dot = Graph.Graphviz.Dot(DotArg)
+
+  type t = G.t
+  let empty = G.empty
+  let add_transitions g state successors =
+    List.fold_left (fun acc state' -> G.add_edge acc state state') g successors
+  let output g file =
+    let out = open_out_bin file in
+    Dot.output_graph out g;
+    close_out out
+end
+
 (** The CESK machine itself *)
 module CESK = struct
   open State
@@ -389,7 +438,7 @@ module CESK = struct
     if Value.max_addr = -1 then
       state.time + 1
     else
-      (state.time + 1) mod Value.max_addr
+      (state.time + 1) mod (Value.max_addr + 1)
   let alloc state x = Address.create state.time x
 
   (** Injection *)
@@ -513,34 +562,37 @@ module CESK = struct
 
   (** Simple work-list state space exploration *)
   let run exp =
-    let rec loop visited todo finals =
+    let rec loop visited todo graph finals =
       if StateSet.is_empty todo then
-        finals
+        (graph, finals)
       else
         let state = StateSet.choose todo in
         let rest = StateSet.remove state todo in
         if StateSet.mem state visited then
-          loop visited rest finals
+          loop visited rest graph finals
         else begin
           (* Printf.printf "Stepping %s: " (State.to_string state); *)
           begin match step state with
             | [] ->
               (* Printf.printf "final state\n%!"; *)
-              loop (StateSet.add state visited) rest (state :: finals)
+              loop (StateSet.add state visited) rest graph (state :: finals)
             | stepped ->
               (* Printf.printf "%s\n%!"
                 (String.concat ", " (List.map State.to_string stepped)); *)
               loop (StateSet.add state visited)
-                (StateSet.union (StateSet.of_list stepped) rest) finals
+                (StateSet.union (StateSet.of_list stepped) rest)
+                (Graph.add_transitions graph state stepped)
+                finals
           end
         end in
-    loop StateSet.empty (StateSet.singleton (inject exp)) []
+    loop StateSet.empty (StateSet.singleton (inject exp)) Graph.empty []
 end
 
 let run name source =
-  let finals = CESK.run (parse source) in
+  let (graph, finals) = CESK.run (parse source) in
   Printf.printf "%s: %s\n%!" name (String.concat "|"
-                                     (List.map State.to_string finals))
+                                     (List.map State.to_string finals));
+  Graph.output graph (name ^ ".dot")
 
 
 let () =
