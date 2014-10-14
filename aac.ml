@@ -500,7 +500,7 @@ module CESK = struct
               let t = {state with control = Exp cons; env; kont; time = tick state}
               and f = {state with control = Exp alt;  env; kont; time = tick state} in
               List.flatten (List.map (fun v ->
-                  if Value.is_true v || Value.is_false v then
+                  if Value.is_true v && Value.is_false v then
                     [t; f]
                   else if Value.is_true v then
                     [t]
@@ -544,7 +544,6 @@ let run name source =
 
 
 let () =
-  run "add" "(+ 1 2)";
   run "simple" "(letrec ((f (lambda (x y) (if x x y)))) (f #t 3))";
   run "sq" "((lambda (x) (* x x)) 8)";
   run "loopy1" "(letrec ((f (lambda (x) (f x)))) (f 1))";
