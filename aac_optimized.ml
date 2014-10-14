@@ -491,21 +491,30 @@ module CESK = struct
 
   (** Implementation of pop as defined in the paper *)
   module ContextSet = Set.Make(Context)
+  module Triple = struct
+    type t = Frame.t * LKont.t * Kont.t
+    let compare (f, lk, k) (f', lk', k') =
+      order_concat [lazy (Frame.compare f f');
+                    lazy (LKont.compare lk lk');
+                    lazy (Kont.compare k k')]
+  end
+  module TripleSet = Set.Make(Triple)
   let pop lkont kont kstore =
     let rec pop' lkont kont g = match lkont, kont with
-      | [], Kont.Empty -> []
-      | f :: lkont', k -> [(f, lkont', k)]
+      | [], Kont.Empty -> TripleSet.empty
+      | f :: lkont', k -> TripleSet.singleton (f, lkont', k)
       | [], Kont.Ctx ctx ->
         let (part1, g') = List.fold_left (fun (s, g') -> function
             | [], Kont.Ctx ctx when not (ContextSet.mem ctx g) ->
               (s, ContextSet.add ctx g')
               | [], Kont.Ctx _ | [], Kont.Empty -> (s, g')
-            | f :: lk, k -> ((f, lk, k) :: s, g'))
-            ([], ContextSet.empty) (KStore.lookup kstore ctx) in
+            | f :: lk, k -> (TripleSet.add (f, lk, k) s, g'))
+            (TripleSet.empty, ContextSet.empty) (KStore.lookup kstore ctx) in
         let gug' = ContextSet.union g g' in
-        let part2 = List.flatten (List.map (fun ctx' -> pop' [] (Kont.Ctx ctx') gug')
-                                    (ContextSet.elements g')) in
-        part1 @ part2 (* TODO: remove duplicates *) in
+        let part2 = ContextSet.fold (fun ctx' acc ->
+            TripleSet.union acc (pop' [] (Kont.Ctx ctx') gug'))
+            g' TripleSet.empty in
+        TripleSet.union part1 part2 in
     pop' lkont kont ContextSet.empty
 
   (** Step functions *)
@@ -525,7 +534,6 @@ module CESK = struct
             (* the only tricky case: we need to push the local continuation in
                the continuation store, and then replace the local cont by an
                empty one *)
-
             if List.length xs != List.length args then
               failwith (Printf.sprintf
                           "Arity mismatch: expected %d argument, got %d"
@@ -595,7 +603,7 @@ module CESK = struct
       let popped = pop state.lkont state.kont state.kstore in
       List.flatten (List.map (fun (frame, lkont, kont) ->
           step_kont state v frame lkont kont)
-          popped)
+          (TripleSet.elements popped))
 
   (** Simple work-list state space exploration *)
   let run exp =
