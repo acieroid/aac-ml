@@ -89,13 +89,13 @@ end
 module Env = MakeEnv(Address)
 
 (** Values *)
-module Value = struct
+module AbstractValue = struct
   type t = [
     | `Closure of lam * Env.t
+    | `Primitive of string
     | `Num
     | `Bool
-    | `Primitive of string
-    ]
+  ]
 
   let is_true = function
     | `Bool -> true
@@ -112,11 +112,11 @@ module Value = struct
       order_concat [lazy (Pervasives.compare lam lam');
                     lazy (Env.compare env env')]
     | `Closure _, _ -> 1 | _, `Closure _ -> -1
+    | `Primitive f, `Primitive f' -> Pervasives.compare f f'
+    | `Primitive _, _ -> 1 | _, `Primitive _ -> -1
     | `Num, `Num -> 0
     | `Num, _ -> 1 | _, `Num -> -1
     | `Bool, `Bool -> 0
-    | `Bool, _ -> 1 | _, `Bool -> -1
-    | `Primitive x, `Primitive y -> Pervasives.compare x y
 
   let to_string = function
     | `Closure ((x, e), _) ->
@@ -131,6 +131,76 @@ module Value = struct
     | "=" | "<=" | ">=" | "<" | ">" -> fun _ -> `Bool
     | f -> failwith ("Unknown primitive: " ^ f)
 end
+
+module ConcreteValue = struct
+  type t = [
+    | `Closure of lam * Env.t
+    | `Primitive of string
+    | `Int of int
+    | `Bool of bool
+  ]
+
+  let is_true = function
+    | `Bool b -> b
+    | _ -> false
+  let is_false = function
+    | `Bool b -> not b
+    | _ -> false
+
+  let bool b = `Bool b
+  let num n = `Int n
+
+  let compare x y = match x, y with
+    | `Closure (lam, env), `Closure (lam', env') ->
+      order_concat [lazy (Pervasives.compare lam lam');
+                    lazy (Env.compare env env')]
+    | `Closure _, _ -> 1 | _, `Closure _ -> -1
+    | `Primitive f, `Primitive f' -> Pervasives.compare f f'
+    | `Primitive _, _ -> 1 | _, `Primitive _ -> -1
+    | `Int n, `Int n' -> Pervasives.compare n n'
+    | `Int _, _ -> 1 | _, `Int _ -> -1
+    | `Bool b, `Bool b' -> Pervasives.compare b b'
+
+  let to_string = function
+    | `Closure ((x, e), _) ->
+      Printf.sprintf "#<clos %s>" (string_of_exp (Abs (x, e)))
+    | `Int n -> string_of_int n
+    | `Bool b -> string_of_bool b
+    | `Primitive x ->
+      Printf.sprintf "#<prim %s>" x
+
+  let arith f x y = match x, y with
+    | `Int n, `Int n' -> `Int (f n n')
+    | _, _ -> failwith ("Invalid arithmetic arguments: " ^ (to_string x) ^
+                        ", " ^ (to_string y))
+
+  let cmp f = function
+    | [`Int n; `Int n'] -> `Bool (f n n')
+    | [x; y] -> failwith ("Invalid argument types: " ^ (to_string x) ^
+                          ", " ^ (to_string y))
+    | _ -> failwith ("Invalid number of arguments for a comparison operator (expected 2)")
+
+  let op = function
+    | "*" -> fun args -> List.fold_left (arith ( * )) (`Int 1) args
+    | "+" -> fun args -> List.fold_left (arith (+)) (`Int 1) args
+    | "-" -> begin function
+        | [] -> failwith "Invalid number of arguments for -"
+        | [arg] -> arith (-) (`Int 0) arg
+        | arg :: args -> List.fold_left (arith (-)) arg args
+      end
+    | "/" -> begin function
+        | [] -> failwith "Invalid number of arguments for /"
+        | [arg] -> arith (/) (`Int 1) arg
+        | arg :: args -> List.fold_left (arith (/)) arg args
+      end
+    | ">" -> cmp (>)
+    | ">=" -> cmp (>=)
+    | "<" -> cmp (<)
+    | "<=" -> cmp (<=)
+    | f -> failwith ("Unknown primitive: " ^ f)
+end
+
+module Value = ConcreteValue
 
 (** Lattice *)
 module Lattice : sig
@@ -439,14 +509,14 @@ module CESK = struct
         if StateSet.mem state visited then
           loop visited rest finals
         else begin
-          Printf.printf "Stepping %s: " (State.to_string state);
+          (* Printf.printf "Stepping %s: " (State.to_string state); *)
           begin match step state with
             | [] ->
-              Printf.printf "final state\n%!";
+              (* Printf.printf "final state\n%!"; *)
               loop (StateSet.add state visited) rest (state :: finals)
             | stepped ->
-              Printf.printf "%s\n%!"
-                (String.concat ", " (List.map State.to_string stepped));
+              (* Printf.printf "%s\n%!"
+                (String.concat ", " (List.map State.to_string stepped)); *)
               loop (StateSet.add state visited)
                 (StateSet.union (StateSet.of_list stepped) rest) finals
           end
@@ -454,13 +524,17 @@ module CESK = struct
     loop StateSet.empty (StateSet.singleton (inject exp)) []
 end
 
+let run name source =
+  let finals = CESK.run (parse source) in
+  Printf.printf "%s: %s\n%!" name (String.concat "|"
+                                     (List.map State.to_string finals))
+
+
 let () =
-  let simple = parse "(letrec ((f (lambda (x y) (if x x y)))) (f #t 3))" in
-  let sq = parse "((lambda (x) (* x x)) 8)" in
-  let loopy1 = parse "(letrec ((f (lambda (x) (f x)))) (f 1))" in
-  let loopy2 = parse "((lambda (x) (x x)) (lambda (y) (y y)))" in
-  let fac = parse "(letrec ((fac (lambda (n) (if (= n 0) 1 (* n (fac (- n 1))))))) (fac 8))" in
-  let fib = parse "(letrec ((fib (lambda (n) (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2))))))) (fib 8))" in
-  let safeloopy1 = parse "(letrec ((count (lambda (n) (letrec ((t (= n 0))) (if t 123 (letrec ((u (- n 1))) (letrec ((v (count u))) v))))))) (count 8))" in
-  let finals = CESK.run safeloopy1 in
-  List.iter (fun state -> print_endline (State.to_string state)) finals
+  run "simple" "(letrec ((f (lambda (x y) (if x x y)))) (f #t 3))";
+  run "sq" "((lambda (x) (* x x)) 8)";
+  run "loopy1" "(letrec ((f (lambda (x) (f x)))) (f 1))";
+  run "loopy2" "((lambda (x) (x x)) (lambda (y) (y y)))";
+  run "fac" "(letrec ((fac (lambda (n) (if (= n 0) 1 (* n (fac (- n 1))))))) (fac 8))";
+  run "fib" "(letrec ((fib (lambda (n) (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2))))))) (fib 8))";
+  run "safeloopy1" "(letrec ((count (lambda (n) (letrec ((t (= n 0))) (if t 123 (letrec ((u (- n 1))) (letrec ((v (count u))) v))))))) (count 8))"
