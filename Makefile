@@ -1,5 +1,6 @@
 TARGET     = aac
 TARGET2    = aac_optimized
+TARGET3    = aac_global
 TEST       = test
 OPTS       = -pp camlp4o -use-ocamlfind
 TAGS       = annot,debug
@@ -16,6 +17,7 @@ OCAMLBUILD = ocamlbuild $(OPTS) -tags $(TAGS) -pkgs $(PKGS) -cflags "$(CFLAGS)"
 all:
 	$(OCAMLBUILD) $(TARGET).$(EXTENSION)
 	$(OCAMLBUILD) $(TARGET2).$(EXTENSION)
+	$(OCAMLBUILD) $(TARGET3).$(EXTENSION)
 
 clean:
 	$(OCAMLBUILD) -clean
