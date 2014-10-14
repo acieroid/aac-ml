@@ -98,8 +98,7 @@ module AbstractValue = struct
   ]
 
   let is_true = function
-    | `Bool -> true
-    | _ -> false
+    | _ -> true
   let is_false = function
     | `Bool -> true
     | _ -> false
@@ -143,8 +142,8 @@ module ConcreteValue = struct
   ]
 
   let is_true = function
-    | `Bool b -> b
-    | _ -> false
+    | `Bool false -> false
+    | _ -> true
   let is_false = function
     | `Bool b -> not b
     | _ -> false
