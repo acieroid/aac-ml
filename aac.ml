@@ -130,6 +130,8 @@ module AbstractValue = struct
     | "*" | "/" | "+" | "-" -> fun _ -> `Num
     | "=" | "<=" | ">=" | "<" | ">" -> fun _ -> `Bool
     | f -> failwith ("Unknown primitive: " ^ f)
+
+  let max_addr = 0
 end
 
 module ConcreteValue = struct
@@ -202,9 +204,11 @@ module ConcreteValue = struct
     | "<=" -> cmp "<=" (<=)
     | "=" -> cmp "=" (=)
     | f -> failwith ("Unknown primitive: " ^ f)
+
+  let max_addr = -1
 end
 
-module Value = ConcreteValue
+module Value = AbstractValue
 
 (** Lattice *)
 module Lattice : sig
@@ -381,7 +385,11 @@ module CESK = struct
   open Control
 
   (** Tick and alloc implementations *)
-  let tick state = (state.time + 1) mod 20
+  let tick state =
+    if Value.max_addr = -1 then
+      state.time + 1
+    else
+      (state.time + 1) mod Value.max_addr
   let alloc state x = Address.create state.time x
 
   (** Injection *)
