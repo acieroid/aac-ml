@@ -81,7 +81,7 @@ struct
   let empty = StringMap.empty
   let extend env v a = StringMap.add v a env
   let lookup env x = try StringMap.find x env with
-  | Not_found -> failwith ("Variable not found: " ^ x)
+    | Not_found -> failwith ("Variable not found: " ^ x)
   let contains env x = StringMap.mem x env
   let compare = StringMap.compare A.compare
 end
@@ -245,7 +245,7 @@ struct
   let empty = M.empty
   let contains store a = M.mem a store
   let lookup store a = try M.find a store with
-  | Not_found -> failwith ("Value not found")
+    | Not_found -> failwith ("Value not found")
   let join store a v =
     if contains store a then
       M.add a (Lattice.join v (M.find a store)) store
@@ -304,6 +304,11 @@ module Frame = struct
       order_concat [lazy (Pervasives.compare cons cons');
                     lazy (Pervasives.compare alt alt');
                     lazy (Env.compare env env')]
+  let to_string = function
+    | AppL (exps, _) -> Printf.sprintf "AppL(%s)" (string_of_list string_of_exp exps)
+    | AppR (exps, _, _, _) -> Printf.sprintf "AppR(%s)" (string_of_list string_of_exp exps)
+    | Letrec (name, _, _, _) -> Printf.sprintf "Letrec(%s)" name
+    | If (_, _, _) -> Printf.sprintf "If"
 end
 
 (** Continuations *)
@@ -507,7 +512,7 @@ module CESK = struct
         let (part1, g') = List.fold_left (fun (s, g') -> function
             | [], Kont.Ctx ctx when not (ContextSet.mem ctx g) ->
               (s, ContextSet.add ctx g')
-              | [], Kont.Ctx _ | [], Kont.Empty -> (s, g')
+            | [], Kont.Ctx _ | [], Kont.Empty -> (s, g')
             | f :: lk, k -> (TripleSet.add (f, lk, k) s, g'))
             (TripleSet.empty, ContextSet.empty) (KStore.lookup kstore ctx) in
         let gug' = ContextSet.union g g' in
@@ -520,7 +525,7 @@ module CESK = struct
   (** Step a continuation state *)
   let step_kont state v frame lkont kont = match frame with
     | Frame.AppL (arg :: args, env) ->
-      let lkont = LKont.push (Frame.AppR (args, v, [], env)) lkont in
+      let lkont = LKont.push (Frame.AppR (args, v, [], state.env)) lkont in
       [{state with control = Exp arg; env; lkont; kont}]
     | Frame.AppL ([], env) ->
       failwith "TODO: functions with 0 arguments not yet implemented"
@@ -545,7 +550,10 @@ module CESK = struct
                    Store.join store a v))
                   (env', state.store) xs args in
               let ctx = Context.create (xs, body) env' args state.store in
-              let kstore = KStore.join state.kstore ctx (state.lkont, state.kont) in
+              (* Error in the paper: they extend the stack store with
+                 (state.lkont, state.kont), therefore forgetting to remove the
+                 AppR that is on top of the stack *)
+              let kstore = KStore.join state.kstore ctx (lkont, state.kont) in
               [{control = Exp body; env = env''; store; kstore;
                 lkont = LKont.empty; kont = Kont.Ctx ctx; time = tick state}]
           | `Primitive f ->
@@ -621,14 +629,14 @@ module CESK = struct
         if StateSet.mem state visited then
           loop visited rest graph finals
         else begin
-          Printf.printf "Stepping %s: " (State.to_string state);
+          (* Printf.printf "Stepping %s: " (State.to_string state); *)
           begin match step state with
             | [] ->
-              Printf.printf "final state\n%!";
+              (* Printf.printf "final state\n%!"; *)
               loop (StateSet.add state visited) rest graph (state :: finals)
             | stepped ->
-              Printf.printf "%s\n%!"
-                (String.concat ", " (List.map State.to_string stepped));
+              (* Printf.printf "%s\n%!"
+                 (String.concat ", " (List.map State.to_string stepped)); *)
               loop (StateSet.add state visited)
                 (StateSet.union (StateSet.of_list stepped) rest)
                 (Graph.add_transitions graph state stepped)
@@ -645,14 +653,15 @@ let run name source =
   Graph.output graph (name ^ ".dot")
 
 let () =
-  (* run "add" "(+ 1 2)"; *)
-  run "letrec" "(letrec ((x 1)) (letrec ((y 2)) (+ x y)))"
-  (* run "if" "(if #t 1 2)"; *)
-  (* run "fun" "((lambda (x) #t) 1)" *)
-  (* run "simple" "(letrec ((f (lambda (x y) (if x x y)))) (f #t 3))";
+  run "add" "(+ 1 2)";
+  run "letrec" "(letrec ((x 1)) (letrec ((y 2)) (+ x y)))";
+  run "if" "(if #t 1 2)";
+  run "fun" "((lambda (x) #t) 1)";
+  run "simple" "(letrec ((f (lambda (x y) (if x x y)))) (f #t 3))";
   run "sq" "((lambda (x) (* x x)) 8)";
   run "loopy1" "(letrec ((f (lambda (x) (f x)))) (f 1))";
   run "loopy2" "((lambda (x) (x x)) (lambda (y) (y y)))";
   run "fac" "(letrec ((fac (lambda (n) (if (= n 0) 1 (* n (fac (- n 1))))))) (fac 8))";
   run "fib" "(letrec ((fib (lambda (n) (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2))))))) (fib 8))";
-  run "safeloopy1" "(letrec ((count (lambda (n) (letrec ((t (= n 0))) (if t 123 (letrec ((u (- n 1))) (letrec ((v (count u))) v))))))) (count 8))" *)
+  run "safeloopy1" "(letrec ((count (lambda (n) (letrec ((t (= n 0))) (if t 123 (letrec ((u (- n 1))) (letrec ((v (count u))) v))))))) (count 8))";
+  ()
