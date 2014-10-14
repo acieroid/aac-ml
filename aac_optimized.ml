@@ -517,7 +517,7 @@ module CESK = struct
         TripleSet.union part1 part2 in
     pop' lkont kont ContextSet.empty
 
-  (** Step functions *)
+  (** Step a continuation state *)
   let step_kont state v frame lkont kont = match frame with
     | Frame.AppL (arg :: args, env) ->
       let lkont = LKont.push (Frame.AppR (args, v, [], env)) lkont in
@@ -576,29 +576,34 @@ module CESK = struct
           else
             []) (Lattice.conc v))
 
-  let step state = match state.control with
-    | Exp (Var x) ->
+  (** Step an evaluation state *)
+  let step_eval state = function
+    | Var x ->
       let v = Store.lookup state.store (Env.lookup state.env x) in
       [{state with control = Val v; time = tick state}]
-    | Exp (Int n) ->
+    | Int n ->
       [{state with control = Val (Lattice.abst (Value.num n)); time = tick state}]
-    | Exp (Bool b) ->
+    | Bool b ->
       [{state with control = Val (Lattice.abst (Value.bool b)); time = tick state}]
-    | Exp (Abs lam) ->
+    | Abs lam ->
       [{state with control = Val (Lattice.abst (`Closure (lam, state.env)));
                    time = tick state}]
-    | Exp (App (f, args)) ->
+    | App (f, args) ->
       let lkont = LKont.push (Frame.AppL (args, state.env)) state.lkont in
       [{state with control = Exp f; lkont; time = tick state}]
-    | Exp (Letrec (x, exp, body)) ->
+    | Letrec (x, exp, body) ->
       let a = alloc state x in
       let env = Env.extend state.env x a in
       let store = Store.join state.store a Lattice.bot in
       let lkont = LKont.push (Frame.Letrec (x, a, body, env)) state.lkont in
       [{state with control = Exp exp; env; store; lkont; time = tick state}]
-    | Exp (If (cond, cons, alt)) ->
+    | If (cond, cons, alt) ->
       let lkont = LKont.push (Frame.If (cons, alt, state.env)) state.lkont in
       [{state with control = Exp cond; lkont; time = tick state}]
+
+  (** Main step function *)
+  let step state = match state.control with
+    | Exp exp -> step_eval state exp
     | Val v ->
       let popped = pop state.lkont state.kont state.kstore in
       List.flatten (List.map (fun (frame, lkont, kont) ->
@@ -639,12 +644,11 @@ let run name source =
                                      (List.map State.to_string finals));
   Graph.output graph (name ^ ".dot")
 
-
 let () =
-  (* run "add" "(+ 1 2)";
-  run "letrec" "(letrec ((x 1)) x)";
-  run "if" "(if #t 1 2)"; *)
-  run "fun" "((lambda (x) #t) 1)"
+  (* run "add" "(+ 1 2)"; *)
+  run "letrec" "(letrec ((x 1)) (letrec ((y 2)) (+ x y)))"
+  (* run "if" "(if #t 1 2)"; *)
+  (* run "fun" "((lambda (x) #t) 1)" *)
   (* run "simple" "(letrec ((f (lambda (x y) (if x x y)))) (f #t 3))";
   run "sq" "((lambda (x) (* x x)) 8)";
   run "loopy1" "(letrec ((f (lambda (x) (f x)))) (f 1))";
