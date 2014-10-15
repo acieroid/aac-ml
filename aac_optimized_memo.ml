@@ -427,7 +427,7 @@ end = struct
   let join kstore ctx k =
     if M.mem ctx kstore.kstore then
       let oldval = M.find ctx kstore.kstore in
-      let newval = S.add k (M.find ctx kstore.kstore) in
+      let newval = S.add k oldval in
       {kstore = M.add ctx newval kstore.kstore;
        ts = if S.compare oldval newval == 0 then kstore.ts else kstore.ts + 1}
     else
