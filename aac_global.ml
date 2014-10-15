@@ -228,7 +228,7 @@ end = struct
   let abst = VSet.singleton
   let conc v = VSet.elements v
   let bot = VSet.empty
-  let to_string v = "{" ^ String.concat "|" (List.map Value.to_string (conc v)) ^ "}"
+  let to_string v = String.concat "|" (List.map Value.to_string (conc v))
 end
 
 (** Store that maps addresses to lattice values *)
@@ -539,7 +539,7 @@ module CESK = struct
       let args = List.rev (v :: args') in
       let store = ref store in
       let kstore = ref kstore in
-      List.flatten (List.map (function
+      let res = List.flatten (List.map (function
           | `Closure ((xs, body), env') ->
             (* the only tricky case: we need to push the local continuation in
                the continuation store, and then replace the local cont by an
@@ -572,7 +572,8 @@ module CESK = struct
                             time = tick state})
               results
           | _ -> [])
-          (Lattice.conc clo)), !store, !kstore
+          (Lattice.conc clo)) in
+       res, !store, !kstore
     | Frame.Letrec (x, a, body, env) ->
       let store' = Store.join store a v in
       [{state with control = Exp body; store_ts = state.store_ts + 1;
