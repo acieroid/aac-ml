@@ -274,15 +274,15 @@ module Context = struct
     lam : lam;
     env : Env.t;
     vals : Lattice.t list;
-    store : Store.t;
+    store_ts : int;
   }
   let compare ctx ctx' =
     order_concat [lazy (Pervasives.compare ctx.lam ctx'.lam);
                   lazy (Env.compare ctx.env ctx'.env);
                   lazy (compare_list Lattice.compare ctx.vals ctx'.vals);
-                  lazy (Store.compare ctx.store ctx'.store)]
+                  lazy (Pervasives.compare ctx.store_ts ctx'.store_ts)]
   let hash = Hashtbl.hash
-  let create lam env vals store = {lam; env; vals; store}
+  let create lam env vals store_ts = {lam; env; vals; store_ts}
   let to_string ctx =
     Printf.sprintf "ctx(%s, %s)" (Value.to_string (`Closure (ctx.lam, ctx.env)))
       (string_of_list Lattice.to_string ctx.vals)
@@ -404,7 +404,7 @@ module State = struct
   type t = {
     control : Control.t;
     env : Env.t;
-    store : Store.t;
+    store_ts : int;
     lkont : LKont.t;
     kont : Kont.t;
     time : int;
@@ -414,7 +414,7 @@ module State = struct
   let compare state state' =
     order_concat [lazy (Control.compare state.control state'.control);
                   lazy (Env.compare state.env state'.env);
-                  lazy (Store.compare state.store state'.store);
+                  lazy (Pervasives.compare state.store_ts state'.store_ts);
                   lazy (LKont.compare state.lkont state'.lkont);
                   lazy (Kont.compare state.kont state'.kont);
                   lazy (Pervasives.compare state.time state'.time); (* TODO *)
@@ -501,11 +501,11 @@ module CESK = struct
     let kstore = KStore.empty in
     { control = Control.Exp exp;
       env = env;
-      store = store;
+      store_ts = Store.ts store;
       lkont = LKont.empty;
       kont = Kont.Empty;
       time = 0;
-      kstore_ts = KStore.ts kstore; }, kstore
+      kstore_ts = KStore.ts kstore; }, store, kstore
 
   (** Call a primitive with every possible argument value (of module Value) from
       the information given by the lattice *)
@@ -549,18 +549,19 @@ module CESK = struct
     pop' lkont kont ContextSet.empty
 
   (** Step a continuation state *)
-  let step_kont state kstore v frame lkont kont =
+  let step_kont state store kstore v frame lkont kont =
     match frame with
     | Frame.AppL (arg :: args, env) ->
       let lkont = LKont.push (Frame.AppR (args, v, [], state.env)) lkont in
-      [{state with control = Exp arg; env; lkont; kont}], kstore
+      [{state with control = Exp arg; env; lkont; kont}], store, kstore
     | Frame.AppL ([], env) ->
       failwith "TODO: functions with 0 arguments not yet implemented"
     | Frame.AppR (arg :: args, clo, argsv, env) ->
       let lkont = LKont.push (Frame.AppR (args, clo, v :: argsv, env)) lkont in
-      [{state with control = Exp arg; env; lkont; kont}], kstore
+      [{state with control = Exp arg; env; lkont; kont}], store, kstore
     | Frame.AppR ([], clo, args', env) ->
       let args = List.rev (v :: args') in
+      let store = ref store in
       let kstore = ref kstore in
       let res = List.flatten (List.map (function
           | `Closure ((xs, body), env') ->
@@ -572,17 +573,17 @@ module CESK = struct
                           "Arity mismatch: expected %d argument, got %d"
                           (List.length xs) (List.length args))
             else
-              let (env'', store') = List.fold_left2 (fun (env, store) x v ->
+              let env'' = List.fold_left2 (fun env x v ->
                   let a = alloc state x in
-                  (Env.extend env x a,
-                   Store.join store a v))
-                  (env', state.store) xs args in
-              let ctx = Context.create (xs, body) env' args state.store in
+                  store := Store.join !store a v;
+                  Env.extend env x a)
+                  env' xs args in
+              let ctx = Context.create (xs, body) env' args state.store_ts in
               (* Error in the paper: they extend the stack store with
                  (state.lkont, state.kont), therefore forgetting to remove the
                  AppR that is on top of the stack *)
               kstore := KStore.join !kstore ctx (lkont, state.kont);
-              [{control = Exp body; env = env''; store = store';
+              [{control = Exp body; env = env''; store_ts = Store.ts !store;
                 kstore_ts = KStore.ts !kstore;
                 lkont = LKont.empty; kont = Kont.Ctx ctx; time = tick state}]
           | `Primitive f ->
@@ -596,11 +597,11 @@ module CESK = struct
               results
           | _ -> [])
           (Lattice.conc clo)) in
-       res, !kstore
+       res, !store, !kstore
     | Frame.Letrec (x, a, body, env) ->
-      let store = Store.join state.store a v in
-      [{state with control = Exp body; store;
-                   env; lkont; kont; time = tick state}], kstore
+      let store' = Store.join store a v in
+      [{state with control = Exp body; store_ts = Store.ts store';
+                   env; lkont; kont; time = tick state}], store', kstore
     | Frame.If (cons, alt, env) ->
       let t = {state with control = Exp cons; env; lkont; kont; time = tick state}
       and f = {state with control = Exp alt;  env; lkont; kont; time = tick state} in
@@ -612,76 +613,78 @@ module CESK = struct
           else if Value.is_false v then
             [f]
           else
-            []) (Lattice.conc v)), kstore
+            []) (Lattice.conc v)), store, kstore
 
   (** Step an evaluation state *)
-  let step_eval state kstore = function
+  let step_eval state store kstore = function
     | Var x ->
-      let v = Store.lookup state.store (Env.lookup state.env x) in
-      [{state with control = Val v; time = tick state}], kstore
+      let v = Store.lookup store (Env.lookup state.env x) in
+      [{state with control = Val v; time = tick state}], store, kstore
     | Int n ->
-      [{state with control = Val (Lattice.abst (Value.num n)); time = tick state}], kstore
+      [{state with control = Val (Lattice.abst (Value.num n)); time = tick state}], store, kstore
     | Bool b ->
-      [{state with control = Val (Lattice.abst (Value.bool b)); time = tick state}], kstore
+      [{state with control = Val (Lattice.abst (Value.bool b)); time = tick state}], store, kstore
     | Abs lam ->
       [{state with control = Val (Lattice.abst (`Closure (lam, state.env)));
-                   time = tick state}], kstore
+                   time = tick state}], store, kstore
     | App (f, args) ->
       let lkont = LKont.push (Frame.AppL (args, state.env)) state.lkont in
-      [{state with control = Exp f; lkont; time = tick state}], kstore
+      [{state with control = Exp f; lkont; time = tick state}], store, kstore
     | Letrec (x, exp, body) ->
       let a = alloc state x in
       let env = Env.extend state.env x a in
-      let store' = Store.join state.store a Lattice.bot in
+      let store' = Store.join store a Lattice.bot in
       let lkont = LKont.push (Frame.Letrec (x, a, body, env)) state.lkont in
-      [{state with control = Exp exp; env; store = store';
-                   lkont; time = tick state}], kstore
+      [{state with control = Exp exp; env; store_ts = Store.ts store';
+                   lkont; time = tick state}], store', kstore
     | If (cond, cons, alt) ->
       let lkont = LKont.push (Frame.If (cons, alt, state.env)) state.lkont in
-      [{state with control = Exp cond; lkont; time = tick state}], kstore
+      [{state with control = Exp cond; lkont; time = tick state}], store, kstore
 
   (** Main step function *)
-  let step state kstore = match state.control with
-    | Exp exp -> step_eval state kstore exp
+  let step state store kstore = match state.control with
+    | Exp exp -> step_eval state store kstore exp
     | Val v ->
       let popped = pop state.lkont state.kont kstore in
+      let store = ref store in
       let kstore = ref kstore in
       let stepped = List.flatten (List.map (fun (frame, lkont, kont) ->
-          let res, kstore' = step_kont state !kstore v frame lkont kont in
+          let res, store', kstore' = step_kont state !store !kstore v frame lkont kont in
+          store := store';
           kstore := kstore';
           res)
           (TripleSet.elements popped)) in
       (* OCaml evaluates tuples right-to-left! *)
-      stepped, !kstore
+      stepped, !store, !kstore
 
   (** Simple work-list state space exploration *)
   let run exp =
-    let rec loop visited todo kstore graph finals =
+    let rec loop visited todo store kstore graph finals =
       if StateSet.is_empty todo then
         (graph, finals)
       else
         let state = StateSet.choose todo in
         let rest = StateSet.remove state todo in
         if StateSet.mem state visited then
-          loop visited rest kstore graph finals
+          loop visited rest store kstore graph finals
         else begin
           (* Printf.printf "Stepping %s" (State.to_string state); *)
-          begin match step state kstore with
-            | [], kstore ->
+          begin match step state store kstore with
+            | [], store, kstore ->
               (* Printf.printf "final state\n%!";*)
-              loop (StateSet.add state visited) rest kstore graph (state :: finals)
-            | stepped, kstore ->
+              loop (StateSet.add state visited) rest store kstore graph (state :: finals)
+            | stepped, store, kstore ->
               (* Printf.printf "%s\n%!"
                 (String.concat ", " (List.map State.to_string stepped)); *)
               loop (StateSet.add state visited)
                 (StateSet.union (StateSet.of_list stepped) rest)
-                kstore
+                store kstore
                 (Graph.add_transitions graph state stepped)
                 finals
           end
         end in
-    let initial, kstore = inject exp in
-    loop StateSet.empty (StateSet.singleton initial) kstore Graph.empty []
+    let initial, store, kstore = inject exp in
+    loop StateSet.empty (StateSet.singleton initial) store kstore Graph.empty []
 end
 
 let run name source =
