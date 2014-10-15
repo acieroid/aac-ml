@@ -425,6 +425,8 @@ module Graph = struct
     let out = open_out_bin file in
     Dot.output_graph out g;
     close_out out
+  let output_stats g =
+    Printf.printf "%d/%d\n%!" (G.nb_vertex g) (G.nb_edges g)
 end
 
 (** The CESK machine itself *)
@@ -589,10 +591,10 @@ end
 
 let run name source =
   let (graph, finals) = CESK.run (parse source) in
-  Printf.printf "%s: %s\n%!" name (String.concat "|"
+  Printf.printf "%s: %s " name (String.concat "|"
                                      (List.map State.to_string finals));
-  Graph.output graph (name ^ ".dot")
-
+  Graph.output graph (name ^ ".dot");
+  Graph.output_stats graph
 
 let () =
   run "add" "(+ 1 2)";
@@ -601,8 +603,8 @@ let () =
   run "fun" "((lambda (x) #t) 1)";
   run "simple" "(letrec ((f (lambda (x y) (if x x y)))) (f #t 3))";
   run "sq" "((lambda (x) (* x x)) 8)";
-(*  run "loopy1" "(letrec ((f (lambda (x) (f x)))) (f 1))"; *)
-(*  run "loopy2" "((lambda (x) (x x)) (lambda (y) (y y)))"; *)
+  run "loopy1" "(letrec ((f (lambda (x) (f x)))) (f 1))";
+  run "loopy2" "((lambda (x) (x x)) (lambda (y) (y y)))";
   run "fac" "(letrec ((fac (lambda (n) (if (= n 0) 1 (* n (fac (- n 1))))))) (fac 8))";
   run "fib" "(letrec ((fib (lambda (n) (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2))))))) (fib 8))";
   run "safeloopy1" "(letrec ((count (lambda (n) (letrec ((t (= n 0))) (if t 123 (letrec ((u (- n 1))) (letrec ((v (count u))) v))))))) (count 8))";
