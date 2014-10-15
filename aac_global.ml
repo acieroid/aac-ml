@@ -240,20 +240,30 @@ sig
   val lookup : t -> A.t -> Lattice.t
   val join : t -> A.t -> Lattice.t -> t
   val compare : t -> t -> int
+  val ts : t -> int
 end = functor (A : AddressSignature) ->
 struct
   module M = Map.Make(A)
-  type t = Lattice.t M.t
-  let empty = M.empty
-  let contains store a = M.mem a store
-  let lookup store a = try M.find a store with
+  type t = {
+    store : Lattice.t M.t;
+    ts : int;
+  }
+  let empty = {store = M.empty; ts = 0}
+  let contains store a = M.mem a store.store
+  let lookup store a = try M.find a store.store with
     | Not_found -> failwith ("Value not found at address " ^ (A.to_string a))
   let join store a v =
     if contains store a then
-      M.add a (Lattice.join v (M.find a store)) store
+      let oldval = M.find a store.store in
+      let newval = Lattice.join v oldval in
+      {store = M.add a newval store.store;
+       ts = if Lattice.compare oldval newval == 0 then store.ts else store.ts + 1}
     else
-      M.add a v store
-  let compare = M.compare Lattice.compare
+      {store = M.add a v store.store; ts = store.ts + 1}
+  let compare store store' =
+    order_concat [lazy (Pervasives.compare store.ts store'.ts);
+                  lazy (M.compare Lattice.compare store.store store'.store)]
+  let ts store = store.ts
 end
 
 module Store = MakeStore(Address)
@@ -343,6 +353,7 @@ module KStore : sig
   val empty : t
   val lookup : t -> Context.t -> (LKont.t * Kont.t) list
   val join : t -> Context.t -> (LKont.t * Kont.t) -> t
+  val ts : t -> int
   val compare : t -> t -> int
 end = struct
   module M = Map.Make(Context)
@@ -353,16 +364,26 @@ end = struct
                     lazy (Kont.compare k k')]
   end
   module S = Set.Make(Pair)
-  type t = S.t M.t
-  let empty = M.empty
-  let lookup kstore ctx = try S.elements (M.find ctx kstore) with
+  type t = {
+    kstore : S.t M.t;
+    ts : int;
+  }
+  let empty = {kstore = M.empty; ts = 0}
+  let lookup kstore ctx = try S.elements (M.find ctx kstore.kstore) with
     | Not_found -> failwith "Continuation not found"
   let join kstore ctx k =
-    if M.mem ctx kstore then
-      M.add ctx (S.add k (M.find ctx kstore)) kstore
+    if M.mem ctx kstore.kstore then
+      let oldval = M.find ctx kstore.kstore in
+      let newval = S.add k (M.find ctx kstore.kstore) in
+      {kstore = M.add ctx newval kstore.kstore;
+       ts = if S.compare oldval newval == 0 then kstore.ts else kstore.ts + 1}
     else
-      M.add ctx (S.singleton k) kstore
-  let compare = M.compare S.compare
+      {kstore = M.add ctx (S.singleton k) kstore.kstore;
+       ts = kstore.ts + 1}
+  let ts kstore = kstore.ts
+  let compare kstore kstore' =
+    order_concat [lazy (Pervasives.compare kstore.ts kstore'.ts);
+                  lazy (M.compare S.compare kstore.kstore kstore'.kstore)]
 end
 
 (** Control part of the CESK state *)
@@ -477,13 +498,14 @@ module CESK = struct
         let a = Address.create 0 name in
         (Env.extend env name a, Store.join store a (Lattice.abst (`Primitive name))))
         (Env.empty, Store.empty) primitives in
+    let kstore = KStore.empty in
     { control = Control.Exp exp;
       env = env;
-      store_ts = 0;
+      store_ts = Store.ts store;
       lkont = LKont.empty;
       kont = Kont.Empty;
       time = 0;
-      kstore_ts = 0; }, store, KStore.empty
+      kstore_ts = KStore.ts kstore; }, store, kstore
 
   (** Call a primitive with every possible argument value (of module Value) from
       the information given by the lattice *)
@@ -561,8 +583,8 @@ module CESK = struct
                  (state.lkont, state.kont), therefore forgetting to remove the
                  AppR that is on top of the stack *)
               kstore := KStore.join !kstore ctx (lkont, state.kont);
-              [{control = Exp body; env = env''; store_ts = state.store_ts + 1;
-                kstore_ts = state.kstore_ts + 1 ;
+              [{control = Exp body; env = env''; store_ts = Store.ts !store;
+                kstore_ts = KStore.ts !kstore;
                 lkont = LKont.empty; kont = Kont.Ctx ctx; time = tick state}]
           | `Primitive f ->
             (* in the case of a primitive call, we don't need to step into a
@@ -578,7 +600,7 @@ module CESK = struct
        res, !store, !kstore
     | Frame.Letrec (x, a, body, env) ->
       let store' = Store.join store a v in
-      [{state with control = Exp body; store_ts = state.store_ts + 1;
+      [{state with control = Exp body; store_ts = Store.ts store';
                    env; lkont; kont; time = tick state}], store', kstore
     | Frame.If (cons, alt, env) ->
       let t = {state with control = Exp cons; env; lkont; kont; time = tick state}
@@ -613,7 +635,7 @@ module CESK = struct
       let env = Env.extend state.env x a in
       let store' = Store.join store a Lattice.bot in
       let lkont = LKont.push (Frame.Letrec (x, a, body, env)) state.lkont in
-      [{state with control = Exp exp; env; store_ts = state.store_ts + 1;
+      [{state with control = Exp exp; env; store_ts = Store.ts store';
                    lkont; time = tick state}], store', kstore
     | If (cond, cons, alt) ->
       let lkont = LKont.push (Frame.If (cons, alt, state.env)) state.lkont in
