@@ -1,0 +1,22 @@
+Implementation of Abstracting Abstract Control (http://arxiv.org/pdf/1305.3163v8.pdf)
+
+  - aac.ml: implementation of the CESK*Ξ machine (Figure 3). This is a CESK
+    machine with a continuation store separate from the value store.
+  - aac_optimized.ml: implementation of the CESIK*Ξ machine (Figure 5). This
+    adds local continuations to the previous machine.
+  - aac_global.ml: implementation of the CESIK*Ξ machine with a globalized
+    continuation store (Shiver's timestamp technique)
+  - aac_global_store.ml: implementation of the CESIK*Ξ machine with globalized
+    stores (continuation and values).
+
+Coming up:
+  - Implementation of the CESIK*Ξ machine with memoization (Figure 12).
+
+To run:
+#+BEGIN_SRC
+$ make
+$ ./aac.byte # or any other .byte
+#+END_SRC
+
+This generates a graph for each example program. Those graphs can be viewed with
+/dot/.
