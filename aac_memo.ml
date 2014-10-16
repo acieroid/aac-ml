@@ -283,7 +283,7 @@ module Context = struct
   let hash = Hashtbl.hash
   let create exp env store time = {exp; env; store; time}
   let to_string ctx =
-    Printf.sprintf "ctx(%s, %s)" (string_of_exp ctx.exp) (string_of_int ctx.time)
+    Printf.sprintf "ctx(%s, %s, %d, %d)" (string_of_exp ctx.exp) (string_of_int ctx.time) (Store.ts ctx.store) ctx.time
 end
 
 (** Frames *)
@@ -559,20 +559,24 @@ module CESK = struct
       (* Consult the memo table *)
       let ctx = Context.create (App (f, args)) state.env state.store state.time in
       let kstore' = KStore.join kstore ctx state.kont in
+      (* In the paper, the kstore is only updated with a memo hit.
+         This is probably a typo, because then the continuations will never be
+         pushed in the continuation store if no memo hit happens.
+         We therefore also update the kstore when the memo table does not
+         contain the context.
+         It is even not necessary to update the kstore when the context is
+         present in the memo table, because we won't touch the contiunaition
+         of the state *)
       if Memo.contains memo ctx then
         (* Memo hit *)
         List.map (fun (e', env', store') ->
-            {state with control = Exp e'; env = env'; store = store';
-                        kstore_ts = KStore.ts kstore'; time = tick state})
+            {state with control = Exp e'; env = env'; store = store'; time = tick state})
           (Memo.lookup memo ctx),
-        kstore', memo
+        kstore, memo
       else
-        (* TODO: In the paper, the kstore is only updated with a memo hit.
-           This might be a typo. To fix that, replace kstore by kstore' below.
-           It might also just be that the Ξ and Ξ' are reversed, ie. don't join
-           on hits but join on non-hits *)
         let kont = Kont.Cons (Frame.AppL (args, state.env), ctx) in
-        [{state with control = Exp f; kont; time = tick state}], kstore, memo
+        [{state with control = Exp f; kont; kstore_ts = KStore.ts kstore';
+                     time = tick state}], kstore', memo
     | Exp (Letrec (x, exp, body)) ->
       let ctx = Context.create (Letrec (x, exp, body)) state.env state.store state.time in
       let a = alloc state x in
@@ -602,7 +606,7 @@ module CESK = struct
           let args = List.rev (v :: args') in
           let konts = KStore.lookup kstore ctx in
           let memo = ref memo in
-          List.flatten (List.map (fun kont ->
+          let res = List.flatten (List.map (fun kont ->
               List.flatten
                 (List.map (function
                      | `Closure ((xs, body), env') ->
@@ -628,7 +632,8 @@ module CESK = struct
                          results
                      | _ -> [])
                     (Lattice.conc clo)))
-              konts), kstore, !memo
+              konts) in
+          res, kstore, !memo
         | Kont.Cons (Frame.Letrec (x, a, body, env), ctx) ->
           let store = Store.join state.store a v in
           let konts = KStore.lookup kstore ctx in
