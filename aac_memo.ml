@@ -556,11 +556,23 @@ module CESK = struct
       [{state with control = Val (Lattice.abst (`Closure (lam, state.env)));
                    time = tick state}], kstore, memo
     | Exp (App (f, args)) ->
+      (* Consult the memo table *)
       let ctx = Context.create (App (f, args)) state.env state.store state.time in
-      let kont = Kont.Cons (Frame.AppL (args, state.env), ctx) in
       let kstore' = KStore.join kstore ctx state.kont in
-      [{state with control = Exp f; kont; kstore_ts = KStore.ts kstore';
-                   time = tick state}], kstore', memo
+      if Memo.contains memo ctx then
+        (* Memo hit *)
+        List.map (fun (e', env', store') ->
+            {state with control = Exp e'; env = env'; store = store';
+                        kstore_ts = KStore.ts kstore'; time = tick state})
+          (Memo.lookup memo ctx),
+        kstore', memo
+      else
+        (* TODO: In the paper, the kstore is only updated with a memo hit.
+           This might be a typo. To fix that, replace kstore by kstore' below.
+           It might also just be that the Ξ and Ξ' are reversed, ie. don't join
+           on hits but join on non-hits *)
+        let kont = Kont.Cons (Frame.AppL (args, state.env), ctx) in
+        [{state with control = Exp f; kont; time = tick state}], kstore, memo
     | Exp (Letrec (x, exp, body)) ->
       let ctx = Context.create (Letrec (x, exp, body)) state.env state.store state.time in
       let a = alloc state x in
@@ -589,6 +601,7 @@ module CESK = struct
         | Kont.Cons (Frame.AppR ([], clo, args', env), ctx) ->
           let args = List.rev (v :: args') in
           let konts = KStore.lookup kstore ctx in
+          let memo = ref memo in
           List.flatten (List.map (fun kont ->
               List.flatten
                 (List.map (function
@@ -603,6 +616,8 @@ module CESK = struct
                              (Env.extend env x a,
                               Store.join store a v))
                              (env', state.store) xs args in
+                         (* Update the memo table *)
+                         memo := Memo.join !memo ctx (body, env'', store);
                          [{state with control = Exp body; env = env'';
                                       store; kont; time = tick state}]
                      | `Primitive f ->
@@ -613,7 +628,7 @@ module CESK = struct
                          results
                      | _ -> [])
                     (Lattice.conc clo)))
-              konts), kstore, memo
+              konts), kstore, !memo
         | Kont.Cons (Frame.Letrec (x, a, body, env), ctx) ->
           let store = Store.join state.store a v in
           let konts = KStore.lookup kstore ctx in
