@@ -1,3 +1,4 @@
+(** CESK*Ξ machine with global Ξ *)
 open Utils
 
 (** The language *)
@@ -41,6 +42,7 @@ let parse s =
           | `Atom v -> v
           | e -> failwith ("invalid argument: " ^ (CCSexp.to_string e)))
           args, aux body)
+    | `List [`Atom "let"; `List [`List [`Atom v; exp]]; body] (* treat lets as letrecs *)
     | `List [`Atom "letrec"; `List [`List [`Atom v; exp]]; body] ->
       Letrec (v, aux exp, aux body)
     | `List [`Atom "if"; cond; cons; alt] ->
@@ -83,7 +85,7 @@ struct
   let empty = StringMap.empty
   let extend env v a = StringMap.add v a env
   let lookup env x = try StringMap.find x env with
-    | Not_found -> failwith ("Variable not found: " ^ x)
+  | Not_found -> failwith ("Variable not found: " ^ x)
   let contains env x = StringMap.mem x env
   let compare = StringMap.compare A.compare
 end
@@ -128,8 +130,8 @@ module AbstractValue = struct
       Printf.sprintf "#<prim %s>" x
 
   let op = function
-    | "*" | "/" | "+" | "-" -> fun _ -> `Num
-    | "=" | "<=" | ">=" | "<" | ">" -> fun _ -> `Bool
+    | "*" | "/" | "+" | "-" | "log" | "modulo" | "ceiling" | "random" -> fun _ -> `Num
+    | "=" | "<=" | ">=" | "<" | ">" | "not" | "even?" | "odd?" -> fun _ -> `Bool
     | f -> failwith ("Unknown primitive: " ^ f)
 
   let max_addr = 0
@@ -270,75 +272,20 @@ module Store = MakeStore(Address)
 
 (** Contexts *)
 module Context = struct
-  type t =
-    (** A context created at a call site *)
-    | Call of exp * Env.t * Store.t
-    (** A context created at an application site *)
-    | App of lam * Env.t * Lattice.t list * Store.t
-  let compare x y = match x, y with
-    | Call (exp, env, store), Call (exp', env', store') ->
-      order_concat [lazy (Pervasives.compare exp exp');
-                    lazy (Env.compare env env');
-                    lazy (Store.compare store store')]
-    | Call _, _ -> 1 | _, Call _ -> -1
-    | App (lam, env, args, store), App (lam', env', args', store') ->
-      order_concat [lazy (Pervasives.compare lam lam');
-                    lazy (Env.compare env env');
-                    lazy (compare_list Lattice.compare args args');
-                    lazy (Store.compare store store')]
-  let hash = Hashtbl.hash
-  let create_app lam env args store = App (lam, env, args, store)
-  let create_call exp env store = Call (exp, env, store)
-  let to_string = function
-    | App (lam, env, args, store) ->
-      Printf.sprintf "ctx_call(%s, %s)" (Value.to_string (`Closure (lam, env)))
-        (string_of_list Lattice.to_string args)
-    | Call (exp, env, store) ->
-      Printf.sprintf "ctx_app(%s)" (string_of_exp exp)
-end
-
-(** Memoization results *)
-module Relevant = struct
-  type t = exp * Env.t * Store.t
-  let compare (e, env, store) (e', env', store') =
-    order_concat [lazy (Pervasives.compare e e');
-                  lazy (Env.compare env env');
-                  lazy (Store.compare store store')]
-end
-
-(** Memo table *)
-module Memo : sig
-  type t
-  val empty : t
-  val ts : t -> int
-  val contains : t -> Context.t -> bool
-  val lookup : t -> Context.t -> Relevant.t list
-  val join : t -> Context.t -> Relevant.t -> t
-end = struct
-  module M = Map.Make(Context)
-  module S = Set.Make(Relevant)
   type t = {
-    memo : S.t M.t;
-    ts : int;
+    exp : exp;
+    env : Env.t;
+    store : Store.t;
+    time : int; (* TODO *)
   }
-  let empty = {memo = M.empty; ts = 0}
-  let ts memo = memo.ts
-  let contains memo ctx = M.mem ctx memo.memo
-  let lookup memo ctx = try S.elements (M.find ctx memo.memo) with
-  | Not_found -> failwith "Cannot find memoized context"
-  let join memo ctx relevant =
-    if contains memo ctx then
-      let oldval = M.find ctx memo.memo in
-      let newval = S.add relevant oldval in
-      {memo = M.add ctx newval memo.memo;
-       ts = if S.compare newval oldval == 0 then memo.ts else memo.ts + 1}
-    else
-      {memo = M.add ctx (S.singleton relevant) memo.memo;
-       ts = memo.ts + 1}
-
-  let compare memo memo' =
-    order_concat [lazy (M.compare S.compare memo.memo memo'.memo);
-                  lazy (Pervasives.compare memo.ts memo'.ts)]
+  let compare ctx ctx' =
+    order_concat [lazy (Pervasives.compare ctx.exp ctx'.exp);
+                  lazy (Env.compare ctx.env ctx'.env);
+                  lazy (Store.compare ctx.store ctx'.store)]
+  let hash = Hashtbl.hash
+  let create exp env store time = {exp; env; store; time}
+  let to_string ctx =
+    Printf.sprintf "ctx(%s, %s)" (string_of_exp ctx.exp) (string_of_int ctx.time)
 end
 
 (** Frames *)
@@ -369,54 +316,32 @@ module Frame = struct
       order_concat [lazy (Pervasives.compare cons cons');
                     lazy (Pervasives.compare alt alt');
                     lazy (Env.compare env env')]
-  let to_string = function
-    | AppL (exps, _) -> Printf.sprintf "AppL(%s)" (string_of_list string_of_exp exps)
-    | AppR (exps, _, _, _) -> Printf.sprintf "AppR(%s)" (string_of_list string_of_exp exps)
-    | Letrec (name, _, _, _) -> Printf.sprintf "Letrec(%s)" name
-    | If (_, _, _) -> Printf.sprintf "If"
 end
 
 (** Continuations *)
 module Kont = struct
   type t =
     | Empty
-    | Ctx of Context.t
+    | Cons of Frame.t * Context.t
   let compare x y = match x, y with
     | Empty, Empty -> 0
     | Empty, _ -> 1 | _, Empty -> -1
-    | Ctx ctx, Ctx ctx' ->
-      Context.compare ctx ctx'
+    | Cons (f, ctx), Cons (f', ctx') ->
+      order_concat [lazy (Frame.compare f f');
+                    lazy (Context.compare ctx ctx')]
 end
 
-(** Local continuations *)
-module LKont = struct
-  type t = Frame.t list
-  let empty = []
-  let is_empty = function
-    | [] -> true
-    | _ -> false
-  let push f lk = f :: lk
-  let compare = compare_list Frame.compare
-end
-
-(** Continuation store that maps contexts to a pair of
-    local continuation and and (normal) continuation *)
+(** Continuation store *)
 module KStore : sig
   type t
   val empty : t
-  val lookup : t -> Context.t -> (LKont.t * Kont.t) list
-  val join : t -> Context.t -> (LKont.t * Kont.t) -> t
-  val ts : t -> int
+  val lookup : t -> Context.t -> Kont.t list
+  val join : t -> Context.t -> Kont.t -> t
   val compare : t -> t -> int
+  val ts : t -> int
 end = struct
   module M = Map.Make(Context)
-  module Pair = struct
-    type t = LKont.t * Kont.t
-    let compare (lk, k) (lk', k') =
-      order_concat [lazy (LKont.compare lk lk');
-                    lazy (Kont.compare k k')]
-  end
-  module S = Set.Make(Pair)
+  module S = Set.Make(Kont)
   type t = {
     kstore : S.t M.t;
     ts : int;
@@ -433,10 +358,19 @@ end = struct
     else
       {kstore = M.add ctx (S.singleton k) kstore.kstore;
        ts = kstore.ts + 1}
-  let ts kstore = kstore.ts
   let compare kstore kstore' =
     order_concat [lazy (Pervasives.compare kstore.ts kstore'.ts);
                   lazy (M.compare S.compare kstore.kstore kstore'.kstore)]
+  let ts kstore = kstore.ts
+end
+
+(** Memoization results *)
+module Relevant = struct
+  type t = exp * Env.t * Store.t
+  let compare (e, env, store) (e', env', store') =
+    order_concat [lazy (Pervasives.compare e e');
+                  lazy (Env.compare env env');
+                  lazy (Store.compare store store')]
 end
 
 (** Control part of the CESK state *)
@@ -458,22 +392,18 @@ module State = struct
     control : Control.t;
     env : Env.t;
     store : Store.t;
-    lkont : LKont.t;
     kont : Kont.t;
     time : int;
     kstore_ts : int;
-    memo_ts : int;
   }
 
   let compare state state' =
     order_concat [lazy (Control.compare state.control state'.control);
                   lazy (Env.compare state.env state'.env);
                   lazy (Store.compare state.store state'.store);
-                  lazy (LKont.compare state.lkont state'.lkont);
                   lazy (Kont.compare state.kont state'.kont);
                   lazy (Pervasives.compare state.time state'.time); (* TODO *)
-                  lazy (Pervasives.compare state.kstore_ts state'.kstore_ts);
-                  lazy (Pervasives.compare state.memo_ts state'.memo_ts)]
+                  lazy (Pervasives.compare state.kstore_ts state'.kstore_ts)]
 
   let to_string state = match state.control with
     | Control.Val v -> Lattice.to_string v
@@ -548,21 +478,18 @@ module CESK = struct
 
   (** Injection *)
   let inject exp =
-    let primitives = ["*"; "/"; "+"; "-"; "="; "<="; ">="; "<"; ">"] in
+    let primitives = ["*"; "/"; "+"; "-"; "="; "<="; ">="; "<"; ">"; "not"; "random"; "modulo"; "ceiling"; "even?"; "odd?"; "log"] in
     let env, store = List.fold_left (fun (env, store) name ->
         let a = Address.create 0 name in
         (Env.extend env name a, Store.join store a (Lattice.abst (`Primitive name))))
         (Env.empty, Store.empty) primitives in
     let kstore = KStore.empty in
-    let memo = Memo.empty in
     { control = Control.Exp exp;
       env = env;
       store = store;
-      lkont = LKont.empty;
       kont = Kont.Empty;
       time = 0;
-      kstore_ts = KStore.ts kstore;
-      memo_ts = Memo.ts memo}, kstore, memo
+      kstore_ts = KStore.ts kstore; }, kstore
 
   (** Call a primitive with every possible argument value (of module Value) from
       the information given by the lattice *)
@@ -577,180 +504,130 @@ module CESK = struct
     let args' = build_args [[]] args in
     List.map (fun revargs -> Value.op f (List.rev revargs)) args'
 
-  (** Implementation of pop as defined in the paper *)
-  module ContextSet = Set.Make(Context)
-  module Triple = struct
-    type t = Frame.t * LKont.t * Kont.t
-    let compare (f, lk, k) (f', lk', k') =
-      order_concat [lazy (Frame.compare f f');
-                    lazy (LKont.compare lk lk');
-                    lazy (Kont.compare k k')]
-  end
-  module TripleSet = Set.Make(Triple)
-  let pop lkont kont kstore =
-    TODO
-    let rec pop' lkont kont g = match lkont, kont with
-      | [], Kont.Empty -> TripleSet.empty
-      | f :: lkont', k -> TripleSet.singleton (f, lkont', k)
-      | [], Kont.Ctx ctx ->
-        let (part1, g') = List.fold_left (fun (s, g') -> function
-            | [], Kont.Ctx ctx when not (ContextSet.mem ctx g) ->
-              (s, ContextSet.add ctx g')
-            | [], Kont.Ctx _ | [], Kont.Empty -> (s, g')
-            | f :: lk, k -> (TripleSet.add (f, lk, k) s, g'))
-            (TripleSet.empty, ContextSet.empty) (KStore.lookup kstore ctx) in
-        let gug' = ContextSet.union g g' in
-        let part2 = ContextSet.fold (fun ctx' acc ->
-            TripleSet.union acc (pop' [] (Kont.Ctx ctx') gug'))
-            g' TripleSet.empty in
-        TripleSet.union part1 part2 in
-    pop' lkont kont ContextSet.empty
-
-  (** Step a continuation state *)
-  let step_kont state kstore memo v frame lkont kont =
-    match frame with
-    | Frame.AppL (arg :: args, env) ->
-      let lkont = LKont.push (Frame.AppR (args, v, [], state.env)) lkont in
-      [{state with control = Exp arg; env; lkont; kont}], kstore, memo
-    | Frame.AppL ([], env) ->
-      failwith "TODO: functions with 0 arguments not yet implemented"
-    | Frame.AppR (arg :: args, clo, argsv, env) ->
-      let lkont = LKont.push (Frame.AppR (args, clo, v :: argsv, env)) lkont in
-      [{state with control = Exp arg; env; lkont; kont}], kstore, memo
-    | Frame.AppR ([], clo, args', env) ->
-      let args = List.rev (v :: args') in
-      let kstore = ref kstore in
-      let res = List.flatten (List.map (function
-          | `Closure ((xs, body), env') ->
-            (* the only tricky case: we need to push the local continuation in
-               the continuation store, and then replace the local cont by an
-               empty one *)
-            if List.length xs != List.length args then
-              []
-            else
-              let (env'', store') = List.fold_left2 (fun (env, store) x v ->
-                  let a = alloc state x in
-                  (Env.extend env x a,
-                   Store.join store a v))
-                  (env', state.store) xs args in
-              let ctx = Context.create_app (xs, body) env' args state.store in
-              (* Error in the paper: they extend the stack store with
-                 (state.lkont, state.kont), therefore forgetting to remove the
-                 AppR that is on top of the stack *)
-              kstore := KStore.join !kstore ctx (lkont, state.kont);
-              [{control = Exp body; env = env''; store = store';
-                kstore_ts = KStore.ts !kstore;
-                lkont = LKont.empty; kont = Kont.Ctx ctx; time = tick state}]
-          | `Primitive f ->
-            (* in the case of a primitive call, we don't need to step into a
-               function's body and can therefore leave the stack unchanged
-               (except for the pop) *)
-            let results = call_prim f args in
-            List.map (fun res ->
-                {state with control = Val (Lattice.abst res); lkont; kont;
-                            time = tick state})
-              results
-          | _ -> [])
-          (Lattice.conc clo)) in
-       res, !kstore, !memo
-    | Frame.Letrec (x, a, body, env) ->
-      let store = Store.join state.store a v in
-      [{state with control = Exp body; store;
-                   env; lkont; kont; time = tick state}], kstore, memo
-    | Frame.If (cons, alt, env) ->
-      let t = {state with control = Exp cons; env; lkont; kont; time = tick state}
-      and f = {state with control = Exp alt;  env; lkont; kont; time = tick state} in
-      List.flatten (List.map (fun v ->
-          if Value.is_true v && Value.is_false v then
-            [t; f]
-          else if Value.is_true v then
-            [t]
-          else if Value.is_false v then
-            [f]
-          else
-            []) (Lattice.conc v)), kstore, memo
-
-  (** Step an evaluation state *)
-  let step_eval state kstore memo = function
-    | Var x ->
+  (** Step function *)
+  let step state kstore = match state.control with
+    | Exp (Var x) ->
       let v = Store.lookup state.store (Env.lookup state.env x) in
-      [{state with control = Val v; time = tick state}], kstore, memo
-    | Int n ->
-      [{state with control = Val (Lattice.abst (Value.num n)); time = tick state}], kstore, memo
-    | Bool b ->
-      [{state with control = Val (Lattice.abst (Value.bool b)); time = tick state}], kstore, memo
-    | Abs lam ->
+      [{state with control = Val v; time = tick state}], kstore
+    | Exp (Int n) ->
+      [{state with control = Val (Lattice.abst (Value.num n));
+                   time = tick state}], kstore
+    | Exp (Bool b) ->
+      [{state with control = Val (Lattice.abst (Value.bool b));
+                   time = tick state}], kstore
+    | Exp (Abs lam) ->
       [{state with control = Val (Lattice.abst (`Closure (lam, state.env)));
-                   time = tick state}], kstore, memo
-    | App (f, args) ->
-      (* Lookup in the memo table to see if we can shortcut this execution *)
-      (* TODO: the paper says "at memo-use time, still extend Ξ so later memo
-        table extensions will flow to previous memo table uses". However, with
-        the CESIK*Ξ machine, Ξ is not extended during function application. *)
-      let ctx = Context.create_call (App (f, args)) state.env state.store in
-      if Memo.contains memo ctx then
-        let relevants = Memo.lookup memo ctx in
-        List.map (fun (e', env', store') ->
-            {state with control = Exp e'; env = env'; store = store'})
-          relevants, kstore, memo
-      else
-        let lkont = LKont.push (Frame.AppL (args, state.env)) state.lkont in
-        [{state with control = Exp f; lkont; time = tick state}], kstore, memo
-    | Letrec (x, exp, body) ->
+                   time = tick state}], kstore
+    | Exp (App (f, args)) ->
+      let ctx = Context.create (App (f, args)) state.env state.store state.time in
+      let kont = Kont.Cons (Frame.AppL (args, state.env), ctx) in
+      let kstore' = KStore.join kstore ctx state.kont in
+      [{state with control = Exp f; kont; kstore_ts = KStore.ts kstore';
+                   time = tick state}], kstore'
+    | Exp (Letrec (x, exp, body)) ->
+      let ctx = Context.create (Letrec (x, exp, body)) state.env state.store state.time in
       let a = alloc state x in
       let env = Env.extend state.env x a in
-      let store' = Store.join state.store a Lattice.bot in
-      let lkont = LKont.push (Frame.Letrec (x, a, body, env)) state.lkont in
-      [{state with control = Exp exp; env; store = store';
-                   lkont; time = tick state}], kstore, memo
-    | If (cond, cons, alt) ->
-      let lkont = LKont.push (Frame.If (cons, alt, state.env)) state.lkont in
-      [{state with control = Exp cond; lkont; time = tick state}], kstore, memo
-
-  (** Main step function *)
-  let step state kstore memo = match state.control with
-    | Exp exp -> step_eval state kstore memo exp
-    | Val v ->
-      let popped = pop state.lkont state.kont kstore in
-      let kstore = ref kstore in
-      let memo = ref memo in
-      let stepped = List.flatten (List.map (fun (frame, lkont, kont) ->
-          let res, kstore', memo' = step_kont state !kstore !memo v frame lkont kont in
-          kstore := kstore';
-          memo := memo';
-          res)
-          (TripleSet.elements popped)) in
-      (* OCaml evaluates tuples right-to-left! *)
-      stepped, !kstore, !memo
+      let store = Store.join state.store a Lattice.bot in
+      let kont = Kont.Cons (Frame.Letrec (x, a, body, env), ctx) in
+      let kstore' = KStore.join kstore ctx state.kont in
+      [{control = Exp exp; env; store; kont; kstore_ts = KStore.ts kstore';
+        time = tick state}], kstore'
+    | Exp (If (cond, cons, alt)) ->
+      let ctx = Context.create (If (cond, cons, alt)) state.env state.store state.time in
+      let kont = Kont.Cons (Frame.If (cons, alt, state.env), ctx) in
+      let kstore' = KStore.join kstore ctx state.kont in
+      [{state with control = Exp cond; kont; kstore_ts = KStore.ts kstore';
+                   time = tick state}], kstore'
+    | Val v -> begin match state.kont with
+        | Kont.Empty -> [], kstore (* Evaluation finished? *)
+        | Kont.Cons (Frame.AppL (arg :: args, env), ctx) ->
+          let kont = Kont.Cons (Frame.AppR (args, v, [], env), ctx) in
+          [{state with control = Exp arg; env; kont}], kstore
+        | Kont.Cons (Frame.AppL ([], env), ctx) ->
+          failwith "TODO: functions with 0 arguments are NYI"
+        | Kont.Cons (Frame.AppR (arg :: args, clo, argsv, env), ctx) ->
+          let kont = Kont.Cons (Frame.AppR (args, clo, v :: argsv, env), ctx) in
+          [{state with control = Exp arg; env; kont}], kstore
+        | Kont.Cons (Frame.AppR ([], clo, args', env), ctx) ->
+          let args = List.rev (v :: args') in
+          let konts = KStore.lookup kstore ctx in
+          List.flatten (List.map (fun kont ->
+              List.flatten
+                (List.map (function
+                     | `Closure ((xs, body), env') ->
+                       if List.length xs != List.length args then
+                         (* Arity mismatch, don't generate a new state *)
+                         []
+                       else
+                         let (env'', store) = List.fold_left2 (fun (env, store) x v ->
+                             let a = alloc state x in
+                             (Env.extend env x a,
+                              Store.join store a v))
+                             (env', state.store) xs args in
+                         [{state with control = Exp body; env = env'';
+                                      store; kont; time = tick state}]
+                     | `Primitive f ->
+                       let results = call_prim f args in
+                       List.map (fun res ->
+                           {state with control = Val (Lattice.abst res); kont;
+                                       time = tick state})
+                         results
+                     | _ -> [])
+                    (Lattice.conc clo)))
+              konts), kstore
+        | Kont.Cons (Frame.Letrec (x, a, body, env), ctx) ->
+          let store = Store.join state.store a v in
+          let konts = KStore.lookup kstore ctx in
+          List.map (fun kont ->
+              {state with control = Exp body; store; env; kont;
+                          time = tick state})
+            konts, kstore
+        | Kont.Cons (Frame.If (cons, alt, env), ctx) ->
+          let konts = KStore.lookup kstore ctx in
+          List.flatten (List.map (fun kont ->
+              let t = {state with control = Exp cons; env; kont; time = tick state}
+              and f = {state with control = Exp alt;  env; kont; time = tick state} in
+              List.flatten (List.map (fun v ->
+                  if Value.is_true v && Value.is_false v then
+                    [t; f]
+                  else if Value.is_true v then
+                    [t]
+                  else if Value.is_false v then
+                    [f]
+                  else
+                    []) (Lattice.conc v)))
+              konts), kstore
+      end
 
   (** Simple work-list state space exploration *)
   let run exp =
-    let rec loop visited todo kstore memo graph finals =
+    let rec loop visited todo kstore graph finals =
       if StateSet.is_empty todo then
         (graph, finals)
       else
         let state = StateSet.choose todo in
         let rest = StateSet.remove state todo in
         if StateSet.mem state visited then
-          loop visited rest kstore memo graph finals
+          loop visited rest kstore graph finals
         else begin
-          (* Printf.printf "Stepping %s" (State.to_string state); *)
-          begin match step state kstore memo with
-            | [], kstore, memo ->
-              (* Printf.printf "final state\n%!";*)
-              loop (StateSet.add state visited) rest kstore memo graph (state :: finals)
-            | stepped, kstore, memo ->
+          (* Printf.printf "Stepping %s: " (State.to_string state); *)
+          begin match step state kstore with
+            | [], kstore ->
+              (* Printf.printf "final state\n%!"; *)
+              loop (StateSet.add state visited) rest kstore graph (state :: finals)
+            | stepped, kstore ->
               (* Printf.printf "%s\n%!"
                 (String.concat ", " (List.map State.to_string stepped)); *)
               loop (StateSet.add state visited)
                 (StateSet.union (StateSet.of_list stepped) rest)
-                kstore memo
+                kstore
                 (Graph.add_transitions graph state stepped)
                 finals
           end
         end in
-    let initial, kstore, memo = inject exp in
-    loop StateSet.empty (StateSet.singleton initial) kstore memo Graph.empty []
+    let initial, kstore = inject exp in
+    loop StateSet.empty (StateSet.singleton initial) kstore Graph.empty []
 end
 
 let run name source =
@@ -761,16 +638,22 @@ let run name source =
   Graph.output_stats graph
 
 let () =
-  run "add" "(+ 1 2)";
-  run "letrec" "(letrec ((x 1)) x)";
-  run "letrec" "(letrec ((x 1)) (letrec ((y 2)) (+ x y)))";
-  run "if" "(if #t 1 2)";
-  run "fun" "((lambda (x) #t) 1)";
-  run "simple" "(letrec ((f (lambda (x y) (if x x y)))) (f #t 3))";
   run "sq" "((lambda (x) (* x x)) 8)";
   run "loopy1" "(letrec ((f (lambda (x) (f x)))) (f 1))";
   run "loopy2" "((lambda (x) (x x)) (lambda (y) (y y)))";
   run "fac" "(letrec ((fac (lambda (n) (if (= n 0) 1 (* n (fac (- n 1))))))) (fac 8))";
   run "fib" "(letrec ((fib (lambda (n) (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2))))))) (fib 8))";
   run "safeloopy1" "(letrec ((count (lambda (n) (letrec ((t (= n 0))) (if t 123 (letrec ((u (- n 1))) (letrec ((v (count u))) v))))))) (count 8))";
+  run "eta" "(let ((_do-something0 (lambda (x) 10))) (let ((_id1 (lambda (_y2) (let ((_tmp13 (_do-something0 1))) _y2)))) (let ((_p7 (_id1 (lambda (_a5) _a5)))) (let ((_tmp24 (_p7 #t))) (let ((_p8 (_id1 (lambda (_b6) _b6)))) (_p8 #f))))))";
+  run "fac" "(letrec ((fac (lambda (n) (let ((t (= n 0))) (if t 1 (let ((u (- n 1))) (let ((v (fac u))) (* n v)))))))) (fac 10))";
+  run "fib" "(letrec ((_fib0 (lambda (_n1) (let ((_p2 (< _n1 2))) (if _p2 _n1 (let ((_p3 (- _n1 1))) (let ((_p4 (_fib0 _p3))) (let ((_p5 (- _n1 2))) (let ((_p6 (_fib0 _p5))) (+ _p4 _p6)))))))))) (_fib0 4))";
+  run "gcIpdExample" "(let ((_id0 (lambda (_x1) _x1))) (letrec ((_f2 (lambda (_n3) (let ((_p6 (<= _n3 1))) (if _p6 1 (let ((_p7 (- _n3 1))) (let ((_p8 (_f2 _p7))) (* _n3 _p8)))))))) (letrec ((_g4 (lambda (_n5) (let ((_p9 (<= _n5 1))) (if _p9 1 (let ((_p10 (* _n5 _n5))) (let ((_p11 (- _n5 1))) (let ((_p12 (_g4 _p11))) (+ _p10 _p12))))))))) (let ((_p13 (_id0 _f2))) (let ((_p14 (_p13 3))) (let ((_p15 (_id0 _g4))) (let ((_p16 (_p15 4))) (+ _p14 _p16))))))))";
+  run "kcfa2" "(let ((_f10 (lambda (_x12) (let ((_f23 (lambda (_x26) (let ((_z7 (lambda (_y18 _y29) _y18))) (_z7 _x12 _x26))))) (let ((_b4 (_f23 #t))) (let ((_c5 (_f23 #f))) (_f23 #t))))))) (let ((_a1 (_f10 #t))) (_f10 #f)))";
+  run "kcfa3" "(let ((_f10 (lambda (_x12) (let ((_f23 (lambda (_x25) (let ((_f36 (lambda (_x38) (let ((_z9 (lambda (_y110 _y211 _y312) _y110))) (_z9 _x12 _x25 _x38))))) (let ((_c7 (_f36 #t))) (_f36 #f)))))) (let ((_b4 (_f23 #t))) (_f23 #f)))))) (let ((_a1 (_f10 #t))) (_f10 #f)))";
+  run "loop2" "(letrec ((_lp10 (lambda (_i1 _x2) (let ((_a3 (= 0 _i1))) (if _a3 _x2 (letrec ((_lp24 (lambda (_j5 _f6 _y7) (let ((_b8 (= 0 _j5))) (if _b8 (let ((_p10 (- _i1 1))) (_lp10 _p10 _y7)) (let ((_p11 (- _j5 1))) (let ((_p12 (_f6 _y7))) (_lp24 _p11 _f6 _p12)))))))) (_lp24 10 (lambda (_n9) (+ _n9 _i1)) _x2))))))) (_lp10 10 0))";
+  run "mj09" "(let ((_h0 (lambda (_b1) (let ((_g2 (lambda (_z3) _z3))) (let ((_f4 (lambda (_k5) (if _b1 (_k5 1) (_k5 2))))) (let ((_y6 (_f4 (lambda (_x7) _x7)))) (_g2 _y6))))))) (let ((_x8 (_h0 #t))) (let ((_y9 (_h0 #f))) _y9)))";
+  run "blur" "(let ((_id0 (lambda (_x1) _x1))) (let ((_blur2 (lambda (_y3) _y3))) (letrec ((_lp4 (lambda (_a5 _n6) (let ((_p9 (<= _n6 1))) (if _p9 (_id0 _a5) (let ((_p10 (_blur2 _id0))) (let ((_r7 (_p10 #t))) (let ((_p11 (_blur2 _id0))) (let ((_s8 (_p11 #f))) (let ((_p12 (_blur2 _lp4))) (let ((_p13 (- _n6 1))) (let ((_p14 (_p12 _s8 _p13))) (not _p14))))))))))))) (_lp4 #f 2))))";
+  run "rotate" "(letrec ((_rotate0 (lambda (_n1 _x2 _y3 _z4) (let ((_p5 (= _n1 0))) (if _p5 _x2 (let ((_p6 (- _n1 1))) (_rotate0 _p6 _y3 _z4 _x2))))))) (_rotate0 41 5 #t #f))";
+  run "sat" "(let ((_phi5 (lambda (_x16 _x27 _x38 _x49) (let ((__t010 _x16)) (let ((_p23 (if __t010 __t010 (let ((__t111 (not _x27))) (if __t111 __t111 (not _x38)))))) (if _p23 (let ((__t212 (not _x27))) (let ((_p24 (if __t212 __t212 (not _x38)))) (if _p24 (let ((__t313 _x49)) (if __t313 __t313 _x27)) #f))) #f)))))) (let ((_try14 (lambda (_f15) (let ((__t416 (_f15 #t))) (if __t416 __t416 (_f15 #f)))))) (let ((_sat-solve-417 (lambda (_p18) (_try14 (lambda (_n119) (_try14 (lambda (_n220) (_try14 (lambda (_n321) (_try14 (lambda (_n422) (_p18 _n119 _n220 _n321 _n422)))))))))))) (_sat-solve-417 _phi5))))";
+  run "primtest" "(let ((_square9 (lambda (_x10) (* _x10 _x10)))) (letrec ((_modulo-power11 (lambda (_base12 _exp13 _n14) (let ((_p37 (= _exp13 0))) (if _p37 1 (let ((_p38 (odd? _exp13))) (if _p38 (let ((_p39 (- _exp13 1))) (let ((_p40 (_modulo-power11 _base12 _p39 _n14))) (let ((_p41 (* _base12 _p40))) (modulo _p41 _n14)))) (let ((_p42 (/ _exp13 2))) (let ((_p43 (_modulo-power11 _base12 _p42 _n14))) (let ((_p44 (_square9 _p43))) (modulo _p44 _n14))))))))))) (let ((_is-trivial-composite?15 (lambda (_n16) (let ((_p45 (modulo _n16 2))) (let ((__t017 (= _p45 0))) (if __t017 __t017 (let ((_p46 (modulo _n16 3))) (let ((__t118 (= _p46 0))) (if __t118 __t118 (let ((_p47 (modulo _n16 5))) (let ((__t219 (= _p47 0))) (if __t219 __t219 (let ((_p48 (modulo _n16 7))) (let ((__t320 (= _p48 0))) (if __t320 __t320 (let ((_p49 (modulo _n16 11))) (let ((__t421 (= _p49 0))) (if __t421 __t421 (let ((_p50 (modulo _n16 13))) (let ((__t522 (= _p50 0))) (if __t522 __t522 (let ((_p51 (modulo _n16 17))) (let ((__t623 (= _p51 0))) (if __t623 __t623 (let ((_p52 (modulo _n16 19))) (let ((__t724 (= _p52 0))) (if __t724 __t724 (let ((_p53 (modulo _n16 23))) (= _p53 0))))))))))))))))))))))))))))) (letrec ((_is-fermat-prime?25 (lambda (_n26 _iterations27) (let ((__t828 (<= _iterations27 0))) (if __t828 __t828 (let ((_p54 (log _n26))) (let ((_p55 (log 2))) (let ((_p56 (/ _p54 _p55))) (let ((_byte-size29 (ceiling _p56))) (let ((_a30 (random _byte-size29))) (let ((_p57 (- _n26 1))) (let ((_p58 (_modulo-power11 _a30 _p57 _n26))) (let ((_p59 (= _p58 1))) (if _p59 (let ((_p60 (- _iterations27 1))) (_is-fermat-prime?25 _n26 _p60)) #f)))))))))))))) (letrec ((_generate-fermat-prime31 (lambda (_byte-size32 _iterations33) (let ((_n34 (random _byte-size32))) (let ((_p61 (_is-trivial-composite?15 _n34))) (let ((_p62 (not _p61))) (let ((_p63 (if _p62 (_is-fermat-prime?25 _n34 _iterations33) #f))) (if _p63 _n34 (_generate-fermat-prime31 _byte-size32 _iterations33))))))))) (let ((_iterations35 10)) (let ((_byte-size36 15)) (_generate-fermat-prime31 _byte-size36 _iterations35))))))))";
   ()
