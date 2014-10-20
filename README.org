@@ -12,7 +12,16 @@ Implementation of Abstracting Abstract Control (http://arxiv.org/pdf/1305.3163v8
     (Figure 12).
 
 Coming up:
-  - Adaptation of memoization to the CESIK*Ξ machine
+  - aac_optimized_memo.ml: adaptation of memoization to the CESIK*Ξ
+    machine. This causes some problems, as the memoization needs to access
+    contexts when evaluating an application (`(e0 e1)` case), but in the CESIK*Ξ
+    contexts are only created when stepping into the body of a function. There
+    is therefore no way to access the corresponding context when evaluating an
+    application, since the operand and operators where not yet evaluated. It
+    would be feasible to have two kinds of contexts (one created at function
+    application, one created when stepping into a function's body), but we would
+    lose the advantage of having local continuations (as continuations would be
+    stored before every function application).
   - Adaptation of self-adjusting memoization to the CESIK*Ξ machine
 
 To run:
