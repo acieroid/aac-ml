@@ -4,6 +4,7 @@ TARGET3    = aac_global
 TARGET4    = aac_global_store
 TARGET5    = aac_memo
 TARGET6    = aac_baseline
+TARGET7    = aac_optimized_memo
 TEST       = test
 OPTS       = -pp camlp4o -use-ocamlfind
 TAGS       = annot,debug
@@ -24,6 +25,7 @@ all:
 	$(OCAMLBUILD) $(TARGET4).$(EXTENSION)
 	$(OCAMLBUILD) $(TARGET5).$(EXTENSION)
 	$(OCAMLBUILD) $(TARGET6).$(EXTENSION)
+	$(OCAMLBUILD) $(TARGET7).$(EXTENSION)
 
 clean:
 	$(OCAMLBUILD) -clean
