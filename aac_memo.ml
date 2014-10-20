@@ -287,6 +287,8 @@ module Context = struct
     Printf.sprintf "ctx(%s, %s, %d, %d)" (string_of_exp ctx.exp) (string_of_int ctx.time) (Store.ts ctx.store) ctx.time
 end
 
+module ContextSet = Set.Make(Context)
+
 (** Frames *)
 module Frame = struct
   type t =
@@ -336,6 +338,7 @@ module KStore : sig
   val empty : t
   val lookup : t -> Context.t -> Kont.t list
   val join : t -> Context.t -> Kont.t -> t
+  val domain : t -> ContextSet.t
   val compare : t -> t -> int
   val ts : t -> int
   (* Return a delta kstore, containing what has been added between the first and
@@ -360,6 +363,8 @@ end = struct
     else
       {kstore = M.add ctx (S.singleton k) kstore.kstore;
        ts = kstore.ts + 1}
+  let domain kstore =
+    M.fold (fun ctx _ acc -> ContextSet.add ctx acc) kstore.kstore ContextSet.empty
   let compare kstore kstore' =
     order_concat [lazy (Pervasives.compare kstore.ts kstore'.ts);
                   lazy (M.compare S.compare kstore.kstore kstore'.kstore)]
@@ -395,6 +400,7 @@ module Memo : sig
   val ts : t -> int
   val contains : t -> Context.t -> bool
   val lookup : t -> Context.t -> Relevant.t list
+  val domain : t -> ContextSet.t
   val join : t -> Context.t -> Relevant.t -> t
   val delta : t -> t -> t
 end = struct
@@ -418,6 +424,8 @@ end = struct
     else
       {memo = M.add ctx (S.singleton relevant) memo.memo;
        ts = memo.ts + 1}
+  let domain memo =
+    M.fold (fun ctx _ acc -> ContextSet.add ctx acc) memo.memo ContextSet.empty
 
   let compare memo memo' =
     order_concat [lazy (M.compare S.compare memo.memo memo'.memo);
@@ -699,15 +707,38 @@ module CESK = struct
         else begin
           (* Printf.printf "Stepping %s: " (State.to_string state); *)
           begin match step state kstore memo with
-            | [], kstore, memo ->
+            | [], kstore', memo' ->
               (* Printf.printf "final state\n%!"; *)
-              loop (StateSet.add state visited) rest kstore memo graph (state :: finals)
-            | stepped, kstore, memo ->
+              let dkstore = KStore.delta kstore kstore' in
+              let dmemo = Memo.delta memo memo' in
+              let delta = ContextSet.inter (KStore.domain dkstore)
+                  (Memo.domain dmemo) in
+              let to_add = ContextSet.fold (fun ctx acc ->
+                  let relevants = Memo.lookup dmemo ctx in
+                  let konts = KStore.lookup dkstore ctx in
+                  List.fold_left (fun acc (exp, env, store) ->
+                      List.fold_left (fun acc kont ->
+                          StateSet.add {control = Exp exp;
+                                        env; store; kont;
+                                        (* TODO: what should those value be?
+                                           Ideally, we should look into the
+                                           state graph and extract every state
+                                           that matches (exp, env, store, kont).
+                                        *)
+                                        time = 0;
+                                        kstore_ts = KStore.ts kstore';
+                                        memo_ts = Memo.ts memo'}
+                            acc) acc konts)
+                    acc relevants) delta StateSet.empty in
+              let to_add = StateSet.empty in
+              loop (StateSet.add state visited) (StateSet.union to_add rest)
+              kstore' memo' graph (state :: finals)
+            | stepped, kstore', memo' ->
               (* Printf.printf "%s\n%!"
                 (String.concat ", " (List.map State.to_string stepped)); *)
               loop (StateSet.add state visited)
                 (StateSet.union (StateSet.of_list stepped) rest)
-                kstore memo
+                kstore' memo'
                 (Graph.add_transitions graph state stepped)
                 finals
           end
