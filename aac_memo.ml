@@ -338,6 +338,9 @@ module KStore : sig
   val join : t -> Context.t -> Kont.t -> t
   val compare : t -> t -> int
   val ts : t -> int
+  (* Return a delta kstore, containing what has been added between the first and
+     second argument *)
+  val delta : t -> t -> t
 end = struct
   module M = Map.Make(Context)
   module S = Set.Make(Kont)
@@ -361,6 +364,19 @@ end = struct
     order_concat [lazy (Pervasives.compare kstore.ts kstore'.ts);
                   lazy (M.compare S.compare kstore.kstore kstore'.kstore)]
   let ts kstore = kstore.ts
+  let delta kstore kstore' =
+    {kstore =
+       if kstore.ts == kstore'.ts then
+         M.empty
+       else
+         M.merge (fun ctx ks ks' -> match ks, ks' with
+             (* Those case shouldn't happen (the store only grows) *)
+             | None, None | Some _, None -> None
+             | None, Some x -> Some x
+             | Some x, Some y when S.equal x y -> None
+             | Some x, Some y -> Some (S.diff y x))
+           kstore.kstore kstore'.kstore;
+     ts = 0}
 end
 
 (** Memoization results *)
@@ -380,7 +396,7 @@ module Memo : sig
   val contains : t -> Context.t -> bool
   val lookup : t -> Context.t -> Relevant.t list
   val join : t -> Context.t -> Relevant.t -> t
-  val print : t -> unit
+  val delta : t -> t -> t
 end = struct
   module M = Map.Make(Context)
   module S = Set.Make(Relevant)
@@ -403,12 +419,19 @@ end = struct
       {memo = M.add ctx (S.singleton relevant) memo.memo;
        ts = memo.ts + 1}
 
-  let print memo =
-    Printf.printf "Memo keys: %s\n%!" (String.concat ", " (List.map (fun (ctx, _) -> Context.to_string ctx) (M.bindings memo.memo)))
-
   let compare memo memo' =
     order_concat [lazy (M.compare S.compare memo.memo memo'.memo);
                   lazy (Pervasives.compare memo.ts memo'.ts)]
+
+  let delta memo memo' =
+    {memo = M.merge (fun ctx ks ks' -> match ks, ks' with
+         (* Those case shouldn't happen (the store only grows) *)
+         | None, None | Some _, None -> None
+         | None, Some x -> Some x
+         | Some x, Some y when S.equal x y -> None
+         | Some x, Some y -> Some (S.diff y x))
+         memo.memo memo'.memo;
+     ts = 0}
 end
 
 (** Control part of the CESK state *)
