@@ -81,6 +81,8 @@ module Address : AddressSignature = struct
   let create a x = (a, x)
 end
 
+module AddressSet = Set.Make(Address)
+
 (** Environment that map variables to addresses *)
 module MakeEnv : functor (A : AddressSignature) ->
 sig
@@ -426,7 +428,7 @@ module Memo = struct
           M.add id Table.Poly memo
         else
           memo)
-      ids
+      ids memo
 end
 
 module Reads = struct
@@ -435,6 +437,13 @@ module Reads = struct
   type t = S.t M.t
   let empty = M.empty
   let compare = M.compare S.compare
+  let update reads addrs procids =
+    AddressSet.fold (fun addr reads ->
+        if M.mem addr reads then
+          M.add addr (S.union (M.find addr reads) procids) reads
+        else
+          M.add addr procids reads)
+      addrs reads
 end
 
 (** Control part of the CESK state *)
@@ -603,6 +612,21 @@ module CESK = struct
             g' TripleSet.empty in
         TripleSet.union part1 part2 in
     pop' lkont kont ContextSet.empty
+
+  let extract_procids lkont kont kstore =
+    let extract = function
+      | Frame.Mark (id, _) -> ProcIdSet.singleton id
+      | _ -> ProcIdSet.empty in
+    let rec loop lkont kont =
+      let popped = pop lkont kont kstore in
+      if TripleSet.is_empty popped then
+        ProcIdSet.empty
+      else
+        TripleSet.fold (fun (frame, lkont, kont) acc ->
+            ProcIdSet.union (ProcIdSet.union acc (extract frame))
+              (loop lkont kont))
+          popped ProcIdSet.empty in
+    loop lkont kont
 
   (** Step a continuation state *)
   let step_kont state v frame lkont kont = match frame with
