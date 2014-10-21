@@ -22,7 +22,8 @@ Coming up:
     application, one created when stepping into a function's body), but we would
     lose the advantage of having local continuations (as continuations would be
     stored before every function application).
-  - Adaptation of self-adjusting memoization to the CESIK*Ξ machine
+  - aac_optimized_samemo.ml: adaptation of self-adjusting memoization to the
+    CESIK*Ξ machine
 
 To run:
 #+BEGIN_SRC
