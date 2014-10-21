@@ -1,9 +1,8 @@
 open Utils
 
 (* TODO:
-     - Implement memo table, read table (Memo, Table, Reads)
+     - Bookkeeping: updateMemo and updateReads at every step
      - When stepping into a function's body, consult memo
-     - updateMemo and updateReads at every step
 *)
 
 (** The language *)
@@ -382,6 +381,42 @@ end = struct
   let compare = M.compare S.compare
 end
 
+(** Memoization-related structures *)
+module ProcId = struct
+  type t = lam * Env.t
+  let compare (lam, env) (lam', env') =
+    order_concat [lazy (Pervasives.compare lam lam');
+                  lazy (Env.compare env env')]
+end
+
+module Table = struct
+  module LatticeList = struct
+    type t = Lattice.t list
+    let compare = compare_list Lattice.compare
+  end
+  module M = Map.Make(LatticeList)
+  type t = Impure | Poly | Table of Lattice.t M.t
+  let compare x y = match x, y with
+  | Table x, Table y -> M.compare Lattice.compare x y
+  | Table _, _ -> 1 | _, Table _ -> -1
+  | _, _ -> Pervasives.compare x y
+end
+
+module Memo = struct
+  module M = Map.Make(ProcId)
+  type t = Table.t M.t
+  let empty = M.empty
+  let compare = M.compare Table.compare
+end
+
+module Reads = struct
+  module M = Map.Make(Address)
+  module S = Set.Make(ProcId)
+  type t = S.t M.t
+  let empty = M.empty
+  let compare = M.compare S.compare
+end
+
 (** Control part of the CESK state *)
 module Control = struct
   type t =
@@ -405,6 +440,8 @@ module State = struct
     kont : Kont.t;
     time : int;
     kstore : KStore.t;
+    memo : Memo.t;
+    reads : Reads.t;
   }
 
   let compare state state' =
@@ -414,7 +451,9 @@ module State = struct
                   lazy (LKont.compare state.lkont state'.lkont);
                   lazy (Kont.compare state.kont state'.kont);
                   lazy (Pervasives.compare state.time state'.time); (* TODO *)
-                  lazy (KStore.compare state.kstore state'.kstore)]
+                  lazy (KStore.compare state.kstore state'.kstore);
+                  lazy (Memo.compare state.memo state'.memo);
+                  lazy (Reads.compare state.reads state'.reads)]
 
   let to_string state = match state.control with
     | Control.Val v -> Lattice.to_string v
@@ -500,7 +539,9 @@ module CESK = struct
       lkont = LKont.empty;
       kont = Kont.Empty;
       time = 0;
-      kstore = KStore.empty; }
+      kstore = KStore.empty;
+      memo = Memo.empty;
+      reads = Reads.empty; }
 
   (** Call a primitive with every possible argument value (of module Value) from
       the information given by the lattice *)
@@ -573,8 +614,8 @@ module CESK = struct
                  (state.lkont, state.kont), therefore forgetting to remove the
                  AppR that is on top of the stack *)
               let kstore = KStore.join state.kstore ctx (lkont, state.kont) in
-              [{control = Exp body; env = env''; store; kstore;
-                lkont = LKont.empty; kont = Kont.Ctx ctx; time = tick state}]
+              [{state with control = Exp body; env = env''; store; kstore;
+                           lkont = LKont.empty; kont = Kont.Ctx ctx; time = tick state}]
           | `Primitive f ->
             (* in the case of a primitive call, we don't need to step into a
                function's body and can therefore leave the stack unchanged
@@ -681,7 +722,6 @@ let run name source =
   Graph.output_stats graph
 
 let () =
-  run "set!" "(let ((x 1)) (let ((y (set! x (+ x 1)))) x))";
   run "sq" "((lambda (x) (* x x)) 8)";
   run "loopy1" "(letrec ((f (lambda (x) (f x)))) (f 1))";
   run "loopy2" "((lambda (x) (x x)) (lambda (y) (y y)))";
