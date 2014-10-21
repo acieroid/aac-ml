@@ -1,7 +1,10 @@
 open Utils
 
 (* TODO:
-     - Bookkeeping: updateMemo and updateReads at every step
+     - Add Mark frames
+     - Summarize the list of frames on the stack
+     - Implement Reads.update
+     - Bookkeeping: call Memo.update and Reads.update when necessary
      - When stepping into a function's body, consult memo
 *)
 
@@ -389,6 +392,8 @@ module ProcId = struct
                   lazy (Env.compare env env')]
 end
 
+module ProcIdSet = Set.Make(ProcId)
+
 module Table = struct
   module LatticeList = struct
     type t = Lattice.t list
@@ -407,11 +412,19 @@ module Memo = struct
   type t = Table.t M.t
   let empty = M.empty
   let compare = M.compare Table.compare
+  (** This is updateMemo *)
+  let update memo ids =
+    ProcIdSet.fold (fun id memo ->
+        if M.mem id memo then
+          M.add id Table.Poly memo
+        else
+          memo)
+      ids
 end
 
 module Reads = struct
   module M = Map.Make(Address)
-  module S = Set.Make(ProcId)
+  module S = ProcIdSet
   type t = S.t M.t
   let empty = M.empty
   let compare = M.compare S.compare
