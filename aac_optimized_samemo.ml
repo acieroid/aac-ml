@@ -291,6 +291,16 @@ module Context = struct
       (string_of_list Lattice.to_string ctx.vals)
 end
 
+(** Proc Ids *)
+module ProcId = struct
+  type t = lam * Env.t
+  let compare (lam, env) (lam', env') =
+    order_concat [lazy (Pervasives.compare lam lam');
+                  lazy (Env.compare env env')]
+end
+
+module ProcIdSet = Set.Make(ProcId)
+
 (** Frames *)
 module Frame = struct
   type t =
@@ -299,6 +309,7 @@ module Frame = struct
     | Letrec of string * Address.t * exp * Env.t
     | If of exp * exp * Env.t
     | Set of string * Env.t
+    | Mark of ProcId.t * Env.t
   let compare x y = match x, y with
     | AppL (exps, env), AppL (exps', env') ->
       order_concat [lazy (Pervasives.compare exps exps');
@@ -324,12 +335,17 @@ module Frame = struct
     | Set (var, env), Set (var', env') ->
       order_concat [lazy (Pervasives.compare var var');
                     lazy (Env.compare env env')]
+    | Set _, _ -> 1 | _, Set _ -> -1
+    | Mark (id, env), Mark (id', env') ->
+      order_concat [lazy (ProcId.compare id id');
+                    lazy (Env.compare env env')]
   let to_string = function
     | AppL (exps, _) -> Printf.sprintf "AppL(%s)" (string_of_list string_of_exp exps)
     | AppR (exps, _, _, _) -> Printf.sprintf "AppR(%s)" (string_of_list string_of_exp exps)
     | Letrec (name, _, _, _) -> Printf.sprintf "Letrec(%s)" name
-    | If (_, _, _) -> Printf.sprintf "If"
+    | If (_, _, _) -> "If"
     | Set (v, _) -> Printf.sprintf "Set(%s)" v
+    | Mark (_, _) -> "Mark"
 end
 
 (** Continuations *)
@@ -385,15 +401,6 @@ end = struct
 end
 
 (** Memoization-related structures *)
-module ProcId = struct
-  type t = lam * Env.t
-  let compare (lam, env) (lam', env') =
-    order_concat [lazy (Pervasives.compare lam lam');
-                  lazy (Env.compare env env')]
-end
-
-module ProcIdSet = Set.Make(ProcId)
-
 module Table = struct
   module LatticeList = struct
     type t = Lattice.t list
@@ -626,7 +633,8 @@ module CESK = struct
               (* Error in the paper: they extend the stack store with
                  (state.lkont, state.kont), therefore forgetting to remove the
                  AppR that is on top of the stack *)
-              let kstore = KStore.join state.kstore ctx (lkont, state.kont) in
+              let kstore = KStore.join state.kstore ctx (LKont.push (Frame.Mark (((xs, body), env'), env'))
+                                                           lkont, state.kont) in
               [{state with control = Exp body; env = env''; store; kstore;
                            lkont = LKont.empty; kont = Kont.Ctx ctx; time = tick state}]
           | `Primitive f ->
@@ -661,6 +669,8 @@ module CESK = struct
       let store = Store.join state.store a v in
       (* return value should be undefined but who cares *)
       [{state with control = Val v; env; lkont; kont; store; time = tick state}]
+    | Frame.Mark (_, env) ->
+      [{state with env; lkont; kont; time = tick state}]
 
   (** Step an evaluation state *)
   let step_eval state = function
