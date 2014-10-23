@@ -303,7 +303,6 @@ module Frame = struct
     | Letrec of string * Address.t * exp * Env.t
     | If of exp * exp * Env.t
     | Set of string * Env.t
-    | Mark of ProcId.t * Lattice.t list * Env.t
   let compare x y = match x, y with
     | AppL (exps, env), AppL (exps', env') ->
       order_concat [lazy (Pervasives.compare exps exps');
@@ -329,18 +328,12 @@ module Frame = struct
     | Set (var, env), Set (var', env') ->
       order_concat [lazy (Pervasives.compare var var');
                     lazy (Env.compare env env')]
-    | Set _, _ -> 1 | _, Set _ -> -1
-    | Mark (id, args, env), Mark (id', args', env') ->
-      order_concat [lazy (ProcId.compare id id');
-                    lazy (compare_list Lattice.compare args args');
-                    lazy (Env.compare env env')]
   let to_string = function
     | AppL (exps, _) -> Printf.sprintf "AppL(%s)" (string_of_list string_of_exp exps)
     | AppR (exps, _, _, _) -> Printf.sprintf "AppR(%s)" (string_of_list string_of_exp exps)
     | Letrec (name, _, _, _) -> Printf.sprintf "Letrec(%s)" name
     | If (_, _, _) -> "If"
     | Set (v, _) -> Printf.sprintf "Set(%s)" v
-    | Mark (_, _, _) -> "Mark"
 end
 
 (** Continuations *)
@@ -613,11 +606,12 @@ module CESK = struct
                     lazy (Kont.compare k k')]
   end
   module TripleSet = Set.Make(Triple)
-  let pop lkont kont kstore =
-    let rec pop' lkont kont g = match lkont, kont with
-      | [], Kont.Empty -> TripleSet.empty
-      | f :: lkont', k -> TripleSet.singleton (f, lkont', k)
+  let pop lkont kont kstore memo value =
+    let rec pop' lkont kont g memo = match lkont, kont with
+      | [], Kont.Empty -> TripleSet.empty, memo
+      | f :: lkont', k -> TripleSet.singleton (f, lkont', k), memo
       | [], Kont.Ctx ctx ->
+        let memo = Memo.set memo (ctx.Context.lam, ctx.Context.env) (ctx.Context.vals) value in
         let (part1, g') = List.fold_left (fun (s, g') -> function
             | [], Kont.Ctx ctx when not (ContextSet.mem ctx g) ->
               (s, ContextSet.add ctx g')
@@ -625,11 +619,12 @@ module CESK = struct
             | f :: lk, k -> (TripleSet.add (f, lk, k) s, g'))
             (TripleSet.empty, ContextSet.empty) (KStore.lookup kstore ctx) in
         let gug' = ContextSet.union g g' in
-        let part2 = ContextSet.fold (fun ctx' acc ->
-            TripleSet.union acc (pop' [] (Kont.Ctx ctx') gug'))
-            g' TripleSet.empty in
-        TripleSet.union part1 part2 in
-    pop' lkont kont ContextSet.empty
+        let (part2, memo) = ContextSet.fold (fun ctx' (acc, memo) ->
+            let (acc', memo') = (pop' [] (Kont.Ctx ctx') gug' memo) in
+            (TripleSet.union acc acc', memo'))
+            g' (TripleSet.empty, memo) in
+        TripleSet.union part1 part2, memo in
+    pop' lkont kont ContextSet.empty memo
 
   (** Find all the active procedure's id *)
   let extract_procids kont kstore =
@@ -670,7 +665,6 @@ module CESK = struct
             if List.length xs != List.length args then
               []
             else if Memo.contains state.memo closure args then
-              let () = Printf.printf "HIT!\n%!" in
               [{state with control = Val (Memo.lookup state.memo closure args);
                            time = tick state}]
             else
@@ -683,8 +677,7 @@ module CESK = struct
               (* Error in the paper: they extend the stack store with
                  (state.lkont, state.kont), therefore forgetting to remove the
                  AppR that is on top of the stack *)
-              let kstore = KStore.join state.kstore ctx (LKont.push (Frame.Mark (((xs, body), env'), args, env'))
-                                                           lkont, state.kont) in
+              let kstore = KStore.join state.kstore ctx (lkont, state.kont) in
               [{state with control = Exp body; env = env''; store; kstore;
                            lkont = LKont.empty; kont = Kont.Ctx ctx; time = tick state}]
           | `Primitive f ->
@@ -719,9 +712,6 @@ module CESK = struct
       let store = Store.join state.store a v in
       (* return value should be undefined but who cares *)
       [{state with control = Val v; env; lkont; kont; store; time = tick state}]
-    | Frame.Mark (id, dargs, env) ->
-      let memo = Memo.set state.memo id dargs v in
-      [{state with env; lkont; kont; memo; time = tick state}]
 
   (** Step an evaluation state *)
   let step_eval state = function
@@ -761,7 +751,8 @@ module CESK = struct
   let step state = match state.control with
     | Exp exp -> step_eval state exp
     | Val v ->
-      let popped = pop state.lkont state.kont state.kstore in
+      let (popped, memo) = pop state.lkont state.kont state.kstore state.memo v in
+      let state = {state with memo} in
       List.flatten (List.map (fun (frame, lkont, kont) ->
           step_kont state v frame lkont kont)
           (TripleSet.elements popped))
