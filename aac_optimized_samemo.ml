@@ -1,10 +1,6 @@
 open Utils
 
 (* TODO:
-     - Add Mark frames
-     - Summarize the list of frames on the stack
-     - Implement Reads.update
-     - Bookkeeping: call Memo.update and Reads.update when necessary
      - When stepping into a function's body, consult memo
 *)
 
@@ -360,6 +356,9 @@ module Kont = struct
     | Empty, _ -> 1 | _, Empty -> -1
     | Ctx ctx, Ctx ctx' ->
       Context.compare ctx ctx'
+  let to_string = function
+    | Empty -> "KEmpty"
+    | Ctx ctx -> Printf.sprintf "KCtx(%s)" (Context.to_string ctx)
 end
 
 (** Local continuations *)
@@ -429,6 +428,8 @@ module Memo = struct
         else
           memo)
       ids memo
+  let set_impure memo ids =
+    ProcIdSet.fold (fun id memo -> M.add id Table.Impure memo) ids memo
 end
 
 module Reads = struct
@@ -613,20 +614,24 @@ module CESK = struct
         TripleSet.union part1 part2 in
     pop' lkont kont ContextSet.empty
 
-  let extract_procids lkont kont kstore =
-    let extract = function
-      | Frame.Mark (id, _) -> ProcIdSet.singleton id
-      | _ -> ProcIdSet.empty in
-    let rec loop lkont kont =
-      let popped = pop lkont kont kstore in
-      if TripleSet.is_empty popped then
-        ProcIdSet.empty
-      else
-        TripleSet.fold (fun (frame, lkont, kont) acc ->
-            ProcIdSet.union (ProcIdSet.union acc (extract frame))
-              (loop lkont kont))
-          popped ProcIdSet.empty in
-    loop lkont kont
+  (** Find all the active procedure's id *)
+  let extract_procids kont kstore =
+    let rec loop kont visited =
+      let r = match kont with
+      | Kont.Empty -> ProcIdSet.empty
+      | Kont.Ctx ctx ->
+        if ContextSet.mem ctx visited then
+          let visited' = ContextSet.add ctx visited in
+          List.fold_left (fun acc (lkont, kont) ->
+              (* TODO: add to visited' the contexts visited in the previous call
+                 to loop of this fold *)
+              ProcIdSet.union acc (loop kont visited'))
+            (ProcIdSet.singleton (ctx.Context.lam, ctx.Context.env))
+            (KStore.lookup kstore ctx)
+        else
+          ProcIdSet.empty in
+      r in
+    loop kont ContextSet.empty
 
   (** Step a continuation state *)
   let step_kont state v frame lkont kont = match frame with
@@ -699,15 +704,19 @@ module CESK = struct
   (** Step an evaluation state *)
   let step_eval state = function
     | Var x ->
-      let v = Store.lookup state.store (Env.lookup state.env x) in
-      [{state with control = Val v; time = tick state}]
+      let a = Env.lookup state.env x in
+      let v = Store.lookup state.store a in
+      let reads = Reads.update state.reads (AddressSet.singleton a)
+          (extract_procids state.kont state.kstore) in
+      [{state with control = Val v; reads; time = tick state}]
     | Int n ->
       [{state with control = Val (Lattice.abst (Value.num n)); time = tick state}]
     | Bool b ->
       [{state with control = Val (Lattice.abst (Value.bool b)); time = tick state}]
     | Abs lam ->
+      let memo = Memo.update state.memo (ProcIdSet.singleton (lam, state.env)) in
       [{state with control = Val (Lattice.abst (`Closure (lam, state.env)));
-                   time = tick state}]
+                   memo; time = tick state}]
     | App (f, args) ->
       let lkont = LKont.push (Frame.AppL (args, state.env)) state.lkont in
       [{state with control = Exp f; lkont; time = tick state}]
@@ -722,6 +731,8 @@ module CESK = struct
       [{state with control = Exp cond; lkont; time = tick state}]
     | Set (var, exp) ->
       let lkont = LKont.push (Frame.Set (var, state.env)) state.lkont in
+      let ids = extract_procids state.kont state.kstore in
+      let memo = Memo.set_impure state.memo ids in
       [{state with control = Exp exp; lkont; time = tick state}]
 
   (** Main step function *)
