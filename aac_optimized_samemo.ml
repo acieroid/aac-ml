@@ -1,9 +1,5 @@
 open Utils
 
-(* TODO:
-     - When stepping into a function's body, consult memo
-*)
-
 (** The language *)
 type var = string
 and lam = var list * exp
@@ -307,7 +303,7 @@ module Frame = struct
     | Letrec of string * Address.t * exp * Env.t
     | If of exp * exp * Env.t
     | Set of string * Env.t
-    | Mark of ProcId.t * Env.t
+    | Mark of ProcId.t * Lattice.t list * Env.t
   let compare x y = match x, y with
     | AppL (exps, env), AppL (exps', env') ->
       order_concat [lazy (Pervasives.compare exps exps');
@@ -334,8 +330,9 @@ module Frame = struct
       order_concat [lazy (Pervasives.compare var var');
                     lazy (Env.compare env env')]
     | Set _, _ -> 1 | _, Set _ -> -1
-    | Mark (id, env), Mark (id', env') ->
+    | Mark (id, args, env), Mark (id', args', env') ->
       order_concat [lazy (ProcId.compare id id');
+                    lazy (compare_list Lattice.compare args args');
                     lazy (Env.compare env env')]
   let to_string = function
     | AppL (exps, _) -> Printf.sprintf "AppL(%s)" (string_of_list string_of_exp exps)
@@ -343,7 +340,7 @@ module Frame = struct
     | Letrec (name, _, _, _) -> Printf.sprintf "Letrec(%s)" name
     | If (_, _, _) -> "If"
     | Set (v, _) -> Printf.sprintf "Set(%s)" v
-    | Mark (_, _) -> "Mark"
+    | Mark (_, _, _) -> "Mark"
 end
 
 (** Continuations *)
@@ -409,10 +406,20 @@ module Table = struct
   end
   module M = Map.Make(LatticeList)
   type t = Impure | Poly | Table of Lattice.t M.t
+  let empty = Table M.empty
   let compare x y = match x, y with
   | Table x, Table y -> M.compare Lattice.compare x y
   | Table _, _ -> 1 | _, Table _ -> -1
   | _, _ -> Pervasives.compare x y
+  let contains table key = match table with
+    | Impure | Poly -> false
+    | Table t -> M.mem key t
+  let lookup table key = match table with
+    | Table t -> M.find key t
+    | Impure | Poly -> failwith "can't find value in memo table"
+  let set table darg value = match table with
+    | Impure | Poly -> table
+    | Table t -> Table (M.add darg value t)
 end
 
 module Memo = struct
@@ -430,6 +437,16 @@ module Memo = struct
       ids memo
   let set_impure memo ids =
     ProcIdSet.fold (fun id memo -> M.add id Table.Impure memo) ids memo
+  let contains memo id dargs =
+    M.mem id memo && (Table.contains (M.find id memo) dargs)
+  let lookup memo id dargs =
+    Table.lookup (M.find id memo) dargs
+  let set memo id darg value =
+    if M.mem id memo then
+      let t = M.find id memo in
+      M.add id (Table.set t darg value) memo
+    else
+      M.add id (Table.set Table.empty darg value) memo
 end
 
 module Reads = struct
@@ -646,12 +663,16 @@ module CESK = struct
     | Frame.AppR ([], clo, args', env) ->
       let args = List.rev (v :: args') in
       List.flatten (List.map (function
-          | `Closure ((xs, body), env') ->
+          | `Closure (((xs, body), env') as closure) ->
             (* the only tricky case: we need to push the local continuation in
                the continuation store, and then replace the local cont by an
                empty one *)
             if List.length xs != List.length args then
               []
+            else if Memo.contains state.memo closure args then
+              let () = Printf.printf "HIT!\n%!" in
+              [{state with control = Val (Memo.lookup state.memo closure args);
+                           time = tick state}]
             else
               let (env'', store) = List.fold_left2 (fun (env, store) x v ->
                   let a = alloc state x in
@@ -662,7 +683,7 @@ module CESK = struct
               (* Error in the paper: they extend the stack store with
                  (state.lkont, state.kont), therefore forgetting to remove the
                  AppR that is on top of the stack *)
-              let kstore = KStore.join state.kstore ctx (LKont.push (Frame.Mark (((xs, body), env'), env'))
+              let kstore = KStore.join state.kstore ctx (LKont.push (Frame.Mark (((xs, body), env'), args, env'))
                                                            lkont, state.kont) in
               [{state with control = Exp body; env = env''; store; kstore;
                            lkont = LKont.empty; kont = Kont.Ctx ctx; time = tick state}]
@@ -698,8 +719,9 @@ module CESK = struct
       let store = Store.join state.store a v in
       (* return value should be undefined but who cares *)
       [{state with control = Val v; env; lkont; kont; store; time = tick state}]
-    | Frame.Mark (_, env) ->
-      [{state with env; lkont; kont; time = tick state}]
+    | Frame.Mark (id, dargs, env) ->
+      let memo = Memo.set state.memo id dargs v in
+      [{state with env; lkont; kont; memo; time = tick state}]
 
   (** Step an evaluation state *)
   let step_eval state = function
@@ -733,7 +755,7 @@ module CESK = struct
       let lkont = LKont.push (Frame.Set (var, state.env)) state.lkont in
       let ids = extract_procids state.kont state.kstore in
       let memo = Memo.set_impure state.memo ids in
-      [{state with control = Exp exp; lkont; time = tick state}]
+      [{state with control = Exp exp; lkont; memo; time = tick state}]
 
   (** Main step function *)
   let step state = match state.control with
