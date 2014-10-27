@@ -251,7 +251,7 @@ module ConcreteValue = struct
   let max_addr = -1
 end
 
-module Value = ConcreteValue
+module Value = AbstractValue
 
 (** Lattice *)
 module Lattice : sig
