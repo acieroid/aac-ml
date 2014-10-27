@@ -824,7 +824,7 @@ module CESK = struct
               []
             else if Memo.contains state.memo closure args then
               [{state with control = Val (Memo.lookup state.memo closure args);
-                           time = tick state}]
+                           lkont; kont; time = tick state}]
             else
               let (env'', store) = List.fold_left2 (fun (env, store) x v ->
                   let a = alloc state x in
