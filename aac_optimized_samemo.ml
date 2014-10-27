@@ -185,8 +185,13 @@ module ConcreteValue = struct
   let arith name f x y = match x, y with
     | `Int n, `Int n' ->
       `Int (f n n')
-    | _, _ -> failwith (Printf.sprintf "Invalid arithmetic arguments to %s: %s, %s: "
+    | _, _ -> failwith (Printf.sprintf "Invalid arithmetic arguments to %s: %s, %s"
                           name (to_string x) (to_string y))
+
+  let arith1_float name f x = match x with
+    | `Int n -> `Int (int_of_float (float_of_int n))
+    | _ -> failwith (Printf.sprintf "Invalid arithmetic argument to %s: %s"
+                       name (to_string x))
 
   let cmp name f = function
     | [`Int n; `Int n'] -> `Bool (f n n')
@@ -214,12 +219,39 @@ module ConcreteValue = struct
     | "<" -> cmp "<" (<)
     | "<=" -> cmp "<=" (<=)
     | "=" -> cmp "=" (=)
+    | "not" -> begin function
+        | [arg] -> begin match arg with
+            | `Bool false -> `Bool true
+            | _ -> `Bool false
+          end
+        | _ -> failwith "Invalid number of arguments for not"
+      end
+    | "random" -> fun _ -> (`Int (Random.int max_int))
+    | "modulo" -> begin function
+      | [x; y] -> arith "modulo" (mod) x y
+      | _ -> failwith "Invalid number of arguments for modulo"
+      end
+    | "ceiling" -> begin function
+        | [arg] -> arith1_float "ceiling" ceil arg
+        | _ -> failwith "Invalid number of arguments for ceiling"
+      end
+    | "even?" | "odd?" -> begin function
+        | [arg] -> begin match arg with
+            | `Int n -> `Bool (if n mod 2 == 0 then name = "even" else name = "odd")
+            | _ -> failwith ("Invalid argument for " ^ name)
+          end
+        | _ -> failwith ("Invalid number of arguments for " ^ name)
+      end
+    | "log" -> begin function
+        | [arg] -> arith1_float "log" log arg
+        | _ -> failwith "Invalid number of arguments for log"
+      end
     | f -> failwith ("Unknown primitive: " ^ f)
 
   let max_addr = -1
 end
 
-module Value = AbstractValue
+module Value = ConcreteValue
 
 (** Lattice *)
 module Lattice : sig
