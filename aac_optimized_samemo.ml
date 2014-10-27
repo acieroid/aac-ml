@@ -13,6 +13,9 @@ and exp =
   | If of exp * exp * exp
   | Set of var * exp
 
+let primitives = ["*"; "/"; "+"; "-"; "="; "<="; ">="; "<"; ">";
+                  "not"; "random"; "modulo"; "ceiling"; "even?"; "odd?"; "log"]
+
 let rec string_of_exp = function
   | Var x -> x
   | Int n -> string_of_int n
@@ -65,15 +68,15 @@ module type AddressSignature = sig
   type t
   val compare : t -> t -> int
   val create : int -> string -> t
+  val to_string : t -> string
 end
 
 module Address : AddressSignature = struct
   type t = int * string
   let compare = Pervasives.compare
   let create a x = (a, x)
+  let to_string (a, x) = Printf.sprintf "@%s%d" x a
 end
-
-module AddressSet = Set.Make(Address)
 
 (** Environment that map variables to addresses *)
 module MakeEnv : functor (A : AddressSignature) ->
@@ -242,28 +245,44 @@ end
 module MakeStore : functor (A : AddressSignature) ->
 sig
   type t
+  module ASet : Set.S with type elt = A.t
   val empty : t
   val contains : t -> A.t -> bool
   val lookup : t -> A.t -> Lattice.t
   val join : t -> A.t -> Lattice.t -> t
   val compare : t -> t -> int
+  val restrict : t -> ASet.t -> t
 end = functor (A : AddressSignature) ->
 struct
   module M = Map.Make(A)
+  module ASet = Set.Make(A)
   type t = Lattice.t M.t
   let empty = M.empty
   let contains store a = M.mem a store
   let lookup store a = try M.find a store with
-    | Not_found -> failwith ("Value not found")
+    | Not_found -> failwith (Printf.sprintf "Value not found at address: %s" (A.to_string a))
   let join store a v =
     if contains store a then
       M.add a (Lattice.join v (M.find a store)) store
     else
       M.add a v store
   let compare = M.compare Lattice.compare
+  let restrict store addrs =
+    M.filter (fun a v ->
+        if ASet.mem a addrs then
+          true
+        else if List.exists (function
+            | `Primitive _ -> true
+            | _ -> false) (Lattice.conc v) then
+          (* Non-primitive values could also be removed *)
+          true
+        else
+          let () = Printf.printf "reclaim(%s)\n%!" (A.to_string a) in
+          false) store
 end
 
 module Store = MakeStore(Address)
+module AddressSet = Store.ASet
 
 (** Contexts *)
 module Context = struct
@@ -294,6 +313,37 @@ module ProcId = struct
 end
 
 module ProcIdSet = Set.Make(ProcId)
+
+(** Helper functions for the GC *)
+module GCHelper = struct
+  let rec fv = function
+    | Var v -> StringSet.singleton v
+    | Int _ | Bool _ -> StringSet.empty
+    | App (f, args) ->
+      List.fold_left (fun acc arg -> StringSet.union acc (fv arg)) (fv f) args
+    | Abs (args, exp) ->
+      StringSet.diff (fv exp) (StringSet.of_list args)
+    | Letrec (v, exp, body) ->
+      StringSet.remove v (StringSet.union (fv exp) (fv body))
+    | If (cond, cons, alt) ->
+      fv cond |> StringSet.union (fv cons) |> StringSet.union (fv alt)
+    | Set (v, exp) ->
+      StringSet.add v (fv exp)
+
+  let reachable_from_vars vars env =
+    StringSet.fold (fun var acc -> AddressSet.add (Env.lookup env var) acc)
+      vars AddressSet.empty
+
+  let reachable exp env =
+    reachable_from_vars (fv exp) env
+
+  let reachable_from_val v =
+    List.fold_left (fun acc -> function
+        | `Closure ((args, exp), env) ->
+          AddressSet.union acc (reachable_from_vars (fv (Abs (args, exp))) env)
+        | _ -> acc)
+      AddressSet.empty (Lattice.conc v)
+end
 
 (** Frames *)
 module Frame = struct
@@ -334,6 +384,27 @@ module Frame = struct
     | Letrec (name, _, _, _) -> Printf.sprintf "Letrec(%s)" name
     | If (_, _, _) -> "If"
     | Set (v, _) -> Printf.sprintf "Set(%s)" v
+
+  let reachable = function
+    | AppL (exps, env) ->
+      List.fold_left (fun acc exp ->
+          AddressSet.union acc (GCHelper.reachable exp env))
+        AddressSet.empty exps
+    | AppR (exps, f, args, env) ->
+      let r = List.fold_left (fun acc exp ->
+          AddressSet.union acc (GCHelper.reachable exp env))
+          AddressSet.empty exps in
+      let r' = AddressSet.union (GCHelper.reachable_from_val f) r in
+      List.fold_left (fun acc v ->
+          AddressSet.union (GCHelper.reachable_from_val f) acc)
+        r' args
+    | Letrec (v, addr, exp, env) ->
+      AddressSet.add addr (GCHelper.reachable exp env)
+    | If (cons, alt, env) ->
+      AddressSet.union (GCHelper.reachable cons env) (GCHelper.reachable alt env)
+    | Set (var, env) ->
+      AddressSet.singleton (Env.lookup env var)
+
 end
 
 (** Continuations *)
@@ -466,6 +537,9 @@ module Control = struct
     | Exp exp, Exp exp' -> Pervasives.compare exp exp'
     | Exp _, _ -> 1 | _, Exp _ -> -1
     | Val v, Val v' -> Lattice.compare v v'
+  let reachable = function
+    | Exp _ -> AddressSet.empty
+    | Val v -> GCHelper.reachable_from_val v
 end
 
 (** State of CESK with continuation store.
@@ -498,6 +572,7 @@ module State = struct
   let to_string state = match state.control with
     | Control.Val v -> Lattice.to_string v
     | Control.Exp e -> string_of_exp e
+
 end
 
 module StateSet = Set.Make(State)
@@ -568,7 +643,6 @@ module CESK = struct
 
   (** Injection *)
   let inject exp =
-    let primitives = ["*"; "/"; "+"; "-"; "="; "<="; ">="; "<"; ">"; "not"; "random"; "modulo"; "ceiling"; "even?"; "odd?"; "log"] in
     let env, store = List.fold_left (fun (env, store) name ->
         let a = Address.create 0 name in
         (Env.extend env name a, Store.join store a (Lattice.abst (`Primitive name))))
@@ -630,20 +704,70 @@ module CESK = struct
   let extract_procids kont kstore =
     let rec loop kont visited =
       let r = match kont with
-      | Kont.Empty -> ProcIdSet.empty
-      | Kont.Ctx ctx ->
-        if ContextSet.mem ctx visited then
-          let visited' = ContextSet.add ctx visited in
-          List.fold_left (fun acc (lkont, kont) ->
-              (* TODO: add to visited' the contexts visited in the previous call
-                 to loop of this fold *)
-              ProcIdSet.union acc (loop kont visited'))
-            (ProcIdSet.singleton (ctx.Context.lam, ctx.Context.env))
-            (KStore.lookup kstore ctx)
-        else
-          ProcIdSet.empty in
+        | Kont.Empty -> ProcIdSet.empty
+        | Kont.Ctx ctx ->
+          if ContextSet.mem ctx visited then
+            let visited' = ContextSet.add ctx visited in
+            List.fold_left (fun acc (lkont, kont) ->
+                (* TODO: add to visited' the contexts visited in the previous call
+                   to loop of this fold *)
+                ProcIdSet.union acc (loop kont visited'))
+              (ProcIdSet.singleton (ctx.Context.lam, ctx.Context.env))
+              (KStore.lookup kstore ctx)
+          else
+            ProcIdSet.empty in
       r in
     loop kont ContextSet.empty
+
+  (** Computes transitive closure of reachable relation *)
+  let reachable_from root store =
+    let step a = GCHelper.reachable_from_val (Store.lookup store a) in
+    let rec loop todo acc =
+      if AddressSet.is_empty todo then
+        acc
+      else
+        let a = AddressSet.choose todo in
+        if AddressSet.mem a acc then
+          loop (AddressSet.remove a todo) acc
+        else
+          let addrs = step a in
+          loop (AddressSet.remove a (AddressSet.union addrs todo))
+            (AddressSet.add a (AddressSet.union addrs acc)) in
+    loop root AddressSet.empty
+
+  (** Computes the set of live addresses in the stack *)
+  let live_stack kont kstore =
+    let rec visit = function
+      | [] ->
+        AddressSet.empty
+      | frame :: lkont ->
+        AddressSet.union (Frame.reachable frame) (visit lkont) in
+    let rec loop kont visited =
+      let r = match kont with
+        | Kont.Empty -> AddressSet.empty
+        | Kont.Ctx ctx ->
+          if ContextSet.mem ctx visited then
+            let visited' = ContextSet.add ctx visited in
+            List.fold_left (fun acc (lkont, kont) ->
+                (* TODO: see extract_procids *)
+                (AddressSet.union acc
+                   (AddressSet.union (visit lkont)
+                      (loop kont visited'))))
+              AddressSet.empty
+              (KStore.lookup kstore ctx)
+          else
+            AddressSet.empty in
+      r in
+    loop kont ContextSet.empty
+
+  (** Computes the set of live addresses of a state *)
+  let live state =
+    reachable_from (AddressSet.union (Control.reachable state.control)
+                      (live_stack state.kont state.kstore))
+      state.store
+
+  (** GC *)
+  let gc state = {state with store = Store.restrict state.store (live state)}
 
   (** Step a continuation state *)
   let step_kont state v frame lkont kont = match frame with
@@ -748,7 +872,7 @@ module CESK = struct
       [{state with control = Exp exp; lkont; memo; time = tick state}]
 
   (** Main step function *)
-  let step state = match state.control with
+  let step_no_gc state = match state.control with
     | Exp exp -> step_eval state exp
     | Val v ->
       let (popped, memo) = pop state.lkont state.kont state.kstore state.memo v in
@@ -756,6 +880,9 @@ module CESK = struct
       List.flatten (List.map (fun (frame, lkont, kont) ->
           step_kont state v frame lkont kont)
           (TripleSet.elements popped))
+
+  (** Garbage-collected step *)
+  let step state = step_no_gc (gc state)
 
   (** Simple work-list state space exploration *)
   let run exp =
