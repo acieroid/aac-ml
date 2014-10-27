@@ -277,7 +277,7 @@ struct
           (* Non-primitive values could also be removed *)
           true
         else
-          let () = Printf.printf "reclaim(%s)\n%!" (A.to_string a) in
+          (* let () = Printf.printf "reclaim(%s)\n%!" (A.to_string a) in *)
           false) store
 end
 
@@ -431,6 +431,7 @@ module LKont = struct
     | _ -> false
   let push f lk = f :: lk
   let compare = compare_list Frame.compare
+  let to_string = string_of_list Frame.to_string
 end
 
 (** Continuation store that maps contexts to a pair of
@@ -441,6 +442,7 @@ module KStore : sig
   val lookup : t -> Context.t -> (LKont.t * Kont.t) list
   val join : t -> Context.t -> (LKont.t * Kont.t) -> t
   val compare : t -> t -> int
+  val contains : t -> Context.t -> bool
 end = struct
   module M = Map.Make(Context)
   module Pair = struct
@@ -460,6 +462,7 @@ end = struct
     else
       M.add ctx (S.singleton k) kstore
   let compare = M.compare S.compare
+  let contains kstore ctx = M.mem ctx kstore
 end
 
 (** Memoization-related structures *)
@@ -537,8 +540,8 @@ module Control = struct
     | Exp exp, Exp exp' -> Pervasives.compare exp exp'
     | Exp _, _ -> 1 | _, Exp _ -> -1
     | Val v, Val v' -> Lattice.compare v v'
-  let reachable = function
-    | Exp _ -> AddressSet.empty
+  let reachable control env = match control with
+    | Exp e -> GCHelper.reachable e env
     | Val v -> GCHelper.reachable_from_val v
 end
 
@@ -570,8 +573,8 @@ module State = struct
                   lazy (Reads.compare state.reads state'.reads)]
 
   let to_string state = match state.control with
-    | Control.Val v -> Lattice.to_string v
-    | Control.Exp e -> string_of_exp e
+    | Control.Val v -> Printf.sprintf "%s" (Lattice.to_string v)
+    | Control.Exp e -> Printf.sprintf "%s" (string_of_exp e)
 
 end
 
@@ -639,7 +642,9 @@ module CESK = struct
       state.time + 1
     else
       (state.time + 1) mod (Value.max_addr + 1)
-  let alloc state x = Address.create state.time x
+  let alloc state x =
+    (* Printf.printf "alloc(%s)\n%!" x; *)
+    Address.create state.time x
 
   (** Injection *)
   let inject exp =
@@ -736,38 +741,38 @@ module CESK = struct
     loop root AddressSet.empty
 
   (** Computes the set of live addresses in the stack *)
-  let live_stack kont kstore =
+  let live_stack lkont kont kstore =
     let rec visit = function
       | [] ->
         AddressSet.empty
       | frame :: lkont ->
         AddressSet.union (Frame.reachable frame) (visit lkont) in
     let rec loop kont visited =
-      let r = match kont with
-        | Kont.Empty -> AddressSet.empty
-        | Kont.Ctx ctx ->
-          if ContextSet.mem ctx visited then
-            let visited' = ContextSet.add ctx visited in
-            List.fold_left (fun acc (lkont, kont) ->
-                (* TODO: see extract_procids *)
-                (AddressSet.union acc
-                   (AddressSet.union (visit lkont)
-                      (loop kont visited'))))
-              AddressSet.empty
-              (KStore.lookup kstore ctx)
-          else
-            AddressSet.empty in
-      r in
-    loop kont ContextSet.empty
+      match kont with
+      | Kont.Empty -> AddressSet.empty
+      | Kont.Ctx ctx ->
+        if not (ContextSet.mem ctx visited) then
+          let visited' = ContextSet.add ctx visited in
+          List.fold_left (fun acc (lkont, kont) ->
+              (* TODO: see extract_procids *)
+              (AddressSet.union acc
+                 (AddressSet.union (visit lkont)
+                    (loop kont visited'))))
+            AddressSet.empty
+            (KStore.lookup kstore ctx)
+        else
+          AddressSet.empty in
+    AddressSet.union (visit lkont) (loop kont ContextSet.empty)
 
   (** Computes the set of live addresses of a state *)
   let live state =
-    reachable_from (AddressSet.union (Control.reachable state.control)
-                      (live_stack state.kont state.kstore))
+    reachable_from (AddressSet.union (Control.reachable state.control state.env)
+                      (live_stack state.lkont state.kont state.kstore))
       state.store
 
   (** GC *)
-  let gc state = {state with store = Store.restrict state.store (live state)}
+  let gc state =
+    {state with store = Store.restrict state.store (live state)}
 
   (** Step a continuation state *)
   let step_kont state v frame lkont kont = match frame with
