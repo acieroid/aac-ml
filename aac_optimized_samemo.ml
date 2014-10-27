@@ -404,7 +404,6 @@ module Frame = struct
       AddressSet.union (GCHelper.reachable cons env) (GCHelper.reachable alt env)
     | Set (var, env) ->
       AddressSet.singleton (Env.lookup env var)
-
 end
 
 (** Continuations *)
@@ -707,21 +706,19 @@ module CESK = struct
 
   (** Find all the active procedure's id *)
   let extract_procids kont kstore =
-    let rec loop kont visited =
-      let r = match kont with
-        | Kont.Empty -> ProcIdSet.empty
-        | Kont.Ctx ctx ->
-          if ContextSet.mem ctx visited then
-            let visited' = ContextSet.add ctx visited in
-            List.fold_left (fun acc (lkont, kont) ->
-                (* TODO: add to visited' the contexts visited in the previous call
-                   to loop of this fold *)
-                ProcIdSet.union acc (loop kont visited'))
-              (ProcIdSet.singleton (ctx.Context.lam, ctx.Context.env))
-              (KStore.lookup kstore ctx)
-          else
-            ProcIdSet.empty in
-      r in
+    let rec loop kont visited = match kont with
+      | Kont.Empty -> ProcIdSet.empty
+      | Kont.Ctx ctx ->
+        if not (ContextSet.mem ctx visited) then
+          let visited' = ContextSet.add ctx visited in
+          List.fold_left (fun acc (lkont, kont) ->
+              (* TODO: add to visited' the contexts visited in the previous call
+                 to loop of this fold *)
+              ProcIdSet.union acc (loop kont visited'))
+            (ProcIdSet.singleton (ctx.Context.lam, ctx.Context.env))
+            (KStore.lookup kstore ctx)
+        else
+          ProcIdSet.empty in
     loop kont ContextSet.empty
 
   (** Computes transitive closure of reachable relation *)
