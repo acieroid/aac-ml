@@ -10,6 +10,8 @@ Implementation of Abstracting Abstract Control (http://arxiv.org/pdf/1305.3163v8
     stores (continuation and values).
   - aac_memo.ml: implementation of the CESK*Ξ machine with memoization
     (Figure 12).
+  - aac_optimized_samemo.ml: adaptation of self-adjusting memoization to the
+    CESIK*Ξ machine, with GC
 
 Coming up:
   - aac_optimized_memo.ml: adaptation of memoization to the CESIK*Ξ
@@ -22,8 +24,6 @@ Coming up:
     application, one created when stepping into a function's body), but we would
     lose the advantage of having local continuations (as continuations would be
     stored before every function application).
-  - aac_optimized_samemo.ml: adaptation of self-adjusting memoization to the
-    CESIK*Ξ machine
 
 To run:
 #+BEGIN_SRC
