@@ -673,7 +673,7 @@ module Graph = struct
     Dot.output_graph out g;
     close_out out
   let output_stats g =
-    Printf.printf "%d/%d\n%!" (G.nb_vertex g) (G.nb_edges g)
+    Printf.printf "%d/%d" (G.nb_vertex g) (G.nb_edges g)
 end
 
 (** The CESK machine itself *)
@@ -969,29 +969,34 @@ module CESK = struct
 end
 
 let run name source =
+  let t0 = Unix.gettimeofday () in
   let (graph, finals) = CESK.run (parse source) in
+  let t1 = Unix.gettimeofday () in
   Printf.printf "%s: %s " name (String.concat "|"
                                      (List.map State.to_string finals));
   Graph.output graph (name ^ ".dot");
-  Graph.output_stats graph
+  Graph.output_stats graph;
+  Printf.printf " %f\n%!" (t1 -. t0)
 
 let () =
-  run "sq" "((lambda (x) (* x x)) 8)";
+  parse_args ();
+(*  run "sq" "((lambda (x) (* x x)) 8)";
   run "loopy1" "(letrec ((f (lambda (x) (f x)))) (f 1))";
   run "loopy2" "((lambda (x) (x x)) (lambda (y) (y y)))";
   run "fac" "(letrec ((fac (lambda (n) (if (= n 0) 1 (* n (fac (- n 1))))))) (fac 8))";
   run "fib" "(letrec ((fib (lambda (n) (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2))))))) (fib 8))";
-  run "safeloopy1" "(letrec ((count (lambda (n) (letrec ((t (= n 0))) (if t 123 (letrec ((u (- n 1))) (letrec ((v (count u))) v))))))) (count 8))";
-  run "eta" "(let ((_do-something0 (lambda (x) 10))) (let ((_id1 (lambda (_y2) (let ((_tmp13 (_do-something0 1))) _y2)))) (let ((_p7 (_id1 (lambda (_a5) _a5)))) (let ((_tmp24 (_p7 #t))) (let ((_p8 (_id1 (lambda (_b6) _b6)))) (_p8 #f))))))";
+  run "safeloopy1" "(letrec ((count (lambda (n) (letrec ((t (= n 0))) (if t 123 (letrec ((u (- n 1))) (letrec ((v (count u))) v))))))) (count 8))"; *)
   run "fac" "(letrec ((fac (lambda (n) (let ((t (= n 0))) (if t 1 (let ((u (- n 1))) (let ((v (fac u))) (* n v)))))))) (fac 10))";
-  run "fib" "(letrec ((_fib0 (lambda (_n1) (let ((_p2 (< _n1 2))) (if _p2 _n1 (let ((_p3 (- _n1 1))) (let ((_p4 (_fib0 _p3))) (let ((_p5 (- _n1 2))) (let ((_p6 (_fib0 _p5))) (+ _p4 _p6)))))))))) (_fib0 4))";
+  run "rotate" "(letrec ((_rotate0 (lambda (_n1 _x2 _y3 _z4) (let ((_p5 (= _n1 0))) (if _p5 _x2 (let ((_p6 (- _n1 1))) (_rotate0 _p6 _y3 _z4 _x2))))))) (_rotate0 41 5 #t #f))";
   run "gcIpdExample" "(let ((_id0 (lambda (_x1) _x1))) (letrec ((_f2 (lambda (_n3) (let ((_p6 (<= _n3 1))) (if _p6 1 (let ((_p7 (- _n3 1))) (let ((_p8 (_f2 _p7))) (* _n3 _p8)))))))) (letrec ((_g4 (lambda (_n5) (let ((_p9 (<= _n5 1))) (if _p9 1 (let ((_p10 (* _n5 _n5))) (let ((_p11 (- _n5 1))) (let ((_p12 (_g4 _p11))) (+ _p10 _p12))))))))) (let ((_p13 (_id0 _f2))) (let ((_p14 (_p13 3))) (let ((_p15 (_id0 _g4))) (let ((_p16 (_p15 4))) (+ _p14 _p16))))))))";
+  run "fib" "(letrec ((_fib0 (lambda (_n1) (let ((_p2 (< _n1 2))) (if _p2 _n1 (let ((_p3 (- _n1 1))) (let ((_p4 (_fib0 _p3))) (let ((_p5 (- _n1 2))) (let ((_p6 (_fib0 _p5))) (+ _p4 _p6)))))))))) (_fib0 4))";
+  run "mj09" "(let ((_h0 (lambda (_b1) (let ((_g2 (lambda (_z3) _z3))) (let ((_f4 (lambda (_k5) (if _b1 (_k5 1) (_k5 2))))) (let ((_y6 (_f4 (lambda (_x7) _x7)))) (_g2 _y6))))))) (let ((_x8 (_h0 #t))) (let ((_y9 (_h0 #f))) _y9)))";
+  run "eta" "(let ((_do-something0 (lambda (x) 10))) (let ((_id1 (lambda (_y2) (let ((_tmp13 (_do-something0 1))) _y2)))) (let ((_p7 (_id1 (lambda (_a5) _a5)))) (let ((_tmp24 (_p7 #t))) (let ((_p8 (_id1 (lambda (_b6) _b6)))) (_p8 #f))))))";
   run "kcfa2" "(let ((_f10 (lambda (_x12) (let ((_f23 (lambda (_x26) (let ((_z7 (lambda (_y18 _y29) _y18))) (_z7 _x12 _x26))))) (let ((_b4 (_f23 #t))) (let ((_c5 (_f23 #f))) (_f23 #t))))))) (let ((_a1 (_f10 #t))) (_f10 #f)))";
+  run "blur" "(let ((_id0 (lambda (_x1) _x1))) (let ((_blur2 (lambda (_y3) _y3))) (letrec ((_lp4 (lambda (_a5 _n6) (let ((_p9 (<= _n6 1))) (if _p9 (_id0 _a5) (let ((_p10 (_blur2 _id0))) (let ((_r7 (_p10 #t))) (let ((_p11 (_blur2 _id0))) (let ((_s8 (_p11 #f))) (let ((_p12 (_blur2 _lp4))) (let ((_p13 (- _n6 1))) (let ((_p14 (_p12 _s8 _p13))) (not _p14))))))))))))) (_lp4 #f 2))))";
   run "kcfa3" "(let ((_f10 (lambda (_x12) (let ((_f23 (lambda (_x25) (let ((_f36 (lambda (_x38) (let ((_z9 (lambda (_y110 _y211 _y312) _y110))) (_z9 _x12 _x25 _x38))))) (let ((_c7 (_f36 #t))) (_f36 #f)))))) (let ((_b4 (_f23 #t))) (_f23 #f)))))) (let ((_a1 (_f10 #t))) (_f10 #f)))";
   run "loop2" "(letrec ((_lp10 (lambda (_i1 _x2) (let ((_a3 (= 0 _i1))) (if _a3 _x2 (letrec ((_lp24 (lambda (_j5 _f6 _y7) (let ((_b8 (= 0 _j5))) (if _b8 (let ((_p10 (- _i1 1))) (_lp10 _p10 _y7)) (let ((_p11 (- _j5 1))) (let ((_p12 (_f6 _y7))) (_lp24 _p11 _f6 _p12)))))))) (_lp24 10 (lambda (_n9) (+ _n9 _i1)) _x2))))))) (_lp10 10 0))";
-  run "mj09" "(let ((_h0 (lambda (_b1) (let ((_g2 (lambda (_z3) _z3))) (let ((_f4 (lambda (_k5) (if _b1 (_k5 1) (_k5 2))))) (let ((_y6 (_f4 (lambda (_x7) _x7)))) (_g2 _y6))))))) (let ((_x8 (_h0 #t))) (let ((_y9 (_h0 #f))) _y9)))";
-  run "blur" "(let ((_id0 (lambda (_x1) _x1))) (let ((_blur2 (lambda (_y3) _y3))) (letrec ((_lp4 (lambda (_a5 _n6) (let ((_p9 (<= _n6 1))) (if _p9 (_id0 _a5) (let ((_p10 (_blur2 _id0))) (let ((_r7 (_p10 #t))) (let ((_p11 (_blur2 _id0))) (let ((_s8 (_p11 #f))) (let ((_p12 (_blur2 _lp4))) (let ((_p13 (- _n6 1))) (let ((_p14 (_p12 _s8 _p13))) (not _p14))))))))))))) (_lp4 #f 2))))";
-  run "rotate" "(letrec ((_rotate0 (lambda (_n1 _x2 _y3 _z4) (let ((_p5 (= _n1 0))) (if _p5 _x2 (let ((_p6 (- _n1 1))) (_rotate0 _p6 _y3 _z4 _x2))))))) (_rotate0 41 5 #t #f))";
+(*
   run "sat" "(let ((_phi5 (lambda (_x16 _x27 _x38 _x49) (let ((__t010 _x16)) (let ((_p23 (if __t010 __t010 (let ((__t111 (not _x27))) (if __t111 __t111 (not _x38)))))) (if _p23 (let ((__t212 (not _x27))) (let ((_p24 (if __t212 __t212 (not _x38)))) (if _p24 (let ((__t313 _x49)) (if __t313 __t313 _x27)) #f))) #f)))))) (let ((_try14 (lambda (_f15) (let ((__t416 (_f15 #t))) (if __t416 __t416 (_f15 #f)))))) (let ((_sat-solve-417 (lambda (_p18) (_try14 (lambda (_n119) (_try14 (lambda (_n220) (_try14 (lambda (_n321) (_try14 (lambda (_n422) (_p18 _n119 _n220 _n321 _n422)))))))))))) (_sat-solve-417 _phi5))))";
-  run "primtest" "(let ((_square9 (lambda (_x10) (* _x10 _x10)))) (letrec ((_modulo-power11 (lambda (_base12 _exp13 _n14) (let ((_p37 (= _exp13 0))) (if _p37 1 (let ((_p38 (odd? _exp13))) (if _p38 (let ((_p39 (- _exp13 1))) (let ((_p40 (_modulo-power11 _base12 _p39 _n14))) (let ((_p41 (* _base12 _p40))) (modulo _p41 _n14)))) (let ((_p42 (/ _exp13 2))) (let ((_p43 (_modulo-power11 _base12 _p42 _n14))) (let ((_p44 (_square9 _p43))) (modulo _p44 _n14))))))))))) (let ((_is-trivial-composite?15 (lambda (_n16) (let ((_p45 (modulo _n16 2))) (let ((__t017 (= _p45 0))) (if __t017 __t017 (let ((_p46 (modulo _n16 3))) (let ((__t118 (= _p46 0))) (if __t118 __t118 (let ((_p47 (modulo _n16 5))) (let ((__t219 (= _p47 0))) (if __t219 __t219 (let ((_p48 (modulo _n16 7))) (let ((__t320 (= _p48 0))) (if __t320 __t320 (let ((_p49 (modulo _n16 11))) (let ((__t421 (= _p49 0))) (if __t421 __t421 (let ((_p50 (modulo _n16 13))) (let ((__t522 (= _p50 0))) (if __t522 __t522 (let ((_p51 (modulo _n16 17))) (let ((__t623 (= _p51 0))) (if __t623 __t623 (let ((_p52 (modulo _n16 19))) (let ((__t724 (= _p52 0))) (if __t724 __t724 (let ((_p53 (modulo _n16 23))) (= _p53 0))))))))))))))))))))))))))))) (letrec ((_is-fermat-prime?25 (lambda (_n26 _iterations27) (let ((__t828 (<= _iterations27 0))) (if __t828 __t828 (let ((_p54 (log _n26))) (let ((_p55 (log 2))) (let ((_p56 (/ _p54 _p55))) (let ((_byte-size29 (ceiling _p56))) (let ((_a30 (random _byte-size29))) (let ((_p57 (- _n26 1))) (let ((_p58 (_modulo-power11 _a30 _p57 _n26))) (let ((_p59 (= _p58 1))) (if _p59 (let ((_p60 (- _iterations27 1))) (_is-fermat-prime?25 _n26 _p60)) #f)))))))))))))) (letrec ((_generate-fermat-prime31 (lambda (_byte-size32 _iterations33) (let ((_n34 (random _byte-size32))) (let ((_p61 (_is-trivial-composite?15 _n34))) (let ((_p62 (not _p61))) (let ((_p63 (if _p62 (_is-fermat-prime?25 _n34 _iterations33) #f))) (if _p63 _n34 (_generate-fermat-prime31 _byte-size32 _iterations33))))))))) (let ((_iterations35 10)) (let ((_byte-size36 15)) (_generate-fermat-prime31 _byte-size36 _iterations35))))))))";
+  run "primtest" "(let ((_square9 (lambda (_x10) (* _x10 _x10)))) (letrec ((_modulo-power11 (lambda (_base12 _exp13 _n14) (let ((_p37 (= _exp13 0))) (if _p37 1 (let ((_p38 (odd? _exp13))) (if _p38 (let ((_p39 (- _exp13 1))) (let ((_p40 (_modulo-power11 _base12 _p39 _n14))) (let ((_p41 (* _base12 _p40))) (modulo _p41 _n14)))) (let ((_p42 (/ _exp13 2))) (let ((_p43 (_modulo-power11 _base12 _p42 _n14))) (let ((_p44 (_square9 _p43))) (modulo _p44 _n14))))))))))) (let ((_is-trivial-composite?15 (lambda (_n16) (let ((_p45 (modulo _n16 2))) (let ((__t017 (= _p45 0))) (if __t017 __t017 (let ((_p46 (modulo _n16 3))) (let ((__t118 (= _p46 0))) (if __t118 __t118 (let ((_p47 (modulo _n16 5))) (let ((__t219 (= _p47 0))) (if __t219 __t219 (let ((_p48 (modulo _n16 7))) (let ((__t320 (= _p48 0))) (if __t320 __t320 (let ((_p49 (modulo _n16 11))) (let ((__t421 (= _p49 0))) (if __t421 __t421 (let ((_p50 (modulo _n16 13))) (let ((__t522 (= _p50 0))) (if __t522 __t522 (let ((_p51 (modulo _n16 17))) (let ((__t623 (= _p51 0))) (if __t623 __t623 (let ((_p52 (modulo _n16 19))) (let ((__t724 (= _p52 0))) (if __t724 __t724 (let ((_p53 (modulo _n16 23))) (= _p53 0))))))))))))))))))))))))))))) (letrec ((_is-fermat-prime?25 (lambda (_n26 _iterations27) (let ((__t828 (<= _iterations27 0))) (if __t828 __t828 (let ((_p54 (log _n26))) (let ((_p55 (log 2))) (let ((_p56 (/ _p54 _p55))) (let ((_byte-size29 (ceiling _p56))) (let ((_a30 (random _byte-size29))) (let ((_p57 (- _n26 1))) (let ((_p58 (_modulo-power11 _a30 _p57 _n26))) (let ((_p59 (= _p58 1))) (if _p59 (let ((_p60 (- _iterations27 1))) (_is-fermat-prime?25 _n26 _p60)) #f)))))))))))))) (letrec ((_generate-fermat-prime31 (lambda (_byte-size32 _iterations33) (let ((_n34 (random _byte-size32))) (let ((_p61 (_is-trivial-composite?15 _n34))) (let ((_p62 (not _p61))) (let ((_p63 (if _p62 (_is-fermat-prime?25 _n34 _iterations33) #f))) (if _p63 _n34 (_generate-fermat-prime31 _byte-size32 _iterations33))))))))) (let ((_iterations35 10)) (let ((_byte-size36 15)) (_generate-fermat-prime31 _byte-size36 _iterations35))))))))"; *)
   ()
