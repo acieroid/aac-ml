@@ -1,5 +1,19 @@
 open Utils
 
+(** Parameters *)
+let param_gc = ref false
+let param_memo = ref false
+
+let speclist = [
+  "-gc", Arg.Set param_gc, "Garbage collection";
+  "-memo", Arg.Set param_memo, "Self-adjusting memoization";
+]
+
+let usage = "usage: " ^ Sys.argv.(0) ^ " [params]"
+
+let parse_args () =
+  Arg.parse speclist (fun x -> failwith ("Invalid argument: " ^ x)) usage
+
 (** The language *)
 type var = string
 and lam = var list * exp
@@ -721,7 +735,9 @@ module CESK = struct
       | [], Kont.Empty -> TripleSet.empty, memo
       | f :: lkont', k -> TripleSet.singleton (f, lkont', k), memo
       | [], Kont.Ctx ctx ->
-        let memo = Memo.set memo (ctx.Context.lam, ctx.Context.env) (ctx.Context.vals) value in
+        let memo = if !param_memo then
+            Memo.set memo (ctx.Context.lam, ctx.Context.env) (ctx.Context.vals) value
+          else memo in
         let (part1, g') = List.fold_left (fun (s, g') -> function
             | [], Kont.Ctx ctx when not (ContextSet.mem ctx g) ->
               (s, ContextSet.add ctx g')
@@ -822,7 +838,7 @@ module CESK = struct
                empty one *)
             if List.length xs != List.length args then
               []
-            else if Memo.contains state.memo closure args then
+            else if !param_memo && Memo.contains state.memo closure args then
               [{state with control = Val (Memo.lookup state.memo closure args);
                            lkont; kont; time = tick state}]
             else
@@ -876,15 +892,19 @@ module CESK = struct
     | Var x ->
       let a = Env.lookup state.env x in
       let v = Store.lookup state.store a in
-      let reads = Reads.update state.reads (AddressSet.singleton a)
-          (extract_procids state.kont state.kstore) in
+      let reads = if !param_memo then
+          Reads.update state.reads (AddressSet.singleton a)
+            (extract_procids state.kont state.kstore)
+        else state.reads in
       [{state with control = Val v; reads; time = tick state}]
     | Int n ->
       [{state with control = Val (Lattice.abst (Value.num n)); time = tick state}]
     | Bool b ->
       [{state with control = Val (Lattice.abst (Value.bool b)); time = tick state}]
     | Abs lam ->
-      let memo = Memo.update state.memo (ProcIdSet.singleton (lam, state.env)) in
+      let memo = if !param_memo then
+          Memo.update state.memo (ProcIdSet.singleton (lam, state.env))
+        else state.memo in
       [{state with control = Val (Lattice.abst (`Closure (lam, state.env)));
                    memo; time = tick state}]
     | App (f, args) ->
@@ -902,7 +922,9 @@ module CESK = struct
     | Set (var, exp) ->
       let lkont = LKont.push (Frame.Set (var, state.env)) state.lkont in
       let ids = extract_procids state.kont state.kstore in
-      let memo = Memo.set_impure state.memo ids in
+      let memo = if !param_memo then
+          Memo.set_impure state.memo ids
+        else state.memo in
       [{state with control = Exp exp; lkont; memo; time = tick state}]
 
   (** Main step function *)
@@ -916,7 +938,7 @@ module CESK = struct
           (TripleSet.elements popped))
 
   (** Garbage-collected step *)
-  let step state = step_no_gc (gc state)
+  let step state = step_no_gc (if !param_gc then gc state else state)
 
   (** Simple work-list state space exploration *)
   let run exp =
